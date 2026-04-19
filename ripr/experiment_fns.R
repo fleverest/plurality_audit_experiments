@@ -1,6 +1,7 @@
 box::use(
   torch[cuda_is_available, cuda_empty_cache, torch_manual_seed, optim_adam],
-  . / optimiser[run_ripr]
+  . / optimiser[run_ripr],
+  . / plots[plot_results_weights, plot_results_loss_history]
 )
 
 run_ripr_target <- function(n, n_restarts, thetas, q, ws) {
@@ -38,4 +39,12 @@ run_ripr_target <- function(n, n_restarts, thetas, q, ws) {
   }
 
   result
+}
+
+make_weights_plot <- function(result) {
+  plot_results_weights(result$best_weights, result$best_losses, top = 50)
+}
+
+make_loss_plot <- function(result) {
+  plot_results_loss_history(log(1 - result$losses_history))
 }

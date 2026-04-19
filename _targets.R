@@ -1,11 +1,8 @@
 library(targets)
 library(crew.cluster)
 
-box::use(
-  ripr / plots[plot_results_weights, plot_results_loss_history],
-  ripr / grids[make_simplex_grid],
-  ripr / experiment_fns[run_ripr_target]
-)
+source("ripr/grids.R")
+source("ripr/experiment_fns.R")
 
 gpu_controller <- crew_controller_slurm(
   name = "gpu",
@@ -41,15 +38,7 @@ list(
     # result targets are dispatched to SLURM GPU jobs
     tar_target(result, run_ripr_target(n, n_restarts, thetas, q, ws)),
     # plot/analysis targets are cheap — run in the orchestrator
-    tar_target(
-      plot_weights,
-      plot_results_weights(result$best_weights, result$best_losses, top = 50),
-      deployment = "main"
-    ),
-    tar_target(
-      plot_loss_history,
-      plot_results_loss_history(log(1 - result$losses_history)),
-      deployment = "main"
-    )
+    tar_target(plot_weights,      make_weights_plot(result),  deployment = "main"),
+    tar_target(plot_loss_history, make_loss_plot(result),     deployment = "main")
   )
 )

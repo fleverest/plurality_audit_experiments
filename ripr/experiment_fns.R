@@ -1,6 +1,5 @@
 box::use(
-  torch[cuda_is_available, cuda_device_count, cuda_get_device_properties,
-        cuda_empty_cache, torch_manual_seed, optim_adam],
+  torch[cuda_is_available, cuda_device_count, cuda_empty_cache, torch_manual_seed, optim_adam],
   ripr / optimiser[run_ripr]
 )
 
@@ -8,8 +7,11 @@ run_ripr_target <- function(n, n_restarts, thetas, q, ws) {
   torch_manual_seed(sample.int(.Machine$integer.max, 1L))
 
   device_info <- if (cuda_is_available()) {
-    props <- cuda_get_device_properties(0L)
-    sprintf("CUDA — %s (%d device(s))", props$name, cuda_device_count())
+    gpu_name <- tryCatch(
+      system2("nvidia-smi", c("--query-gpu=name", "--format=csv,noheader"), stdout = TRUE)[1L],
+      error = function(e) "unknown"
+    )
+    sprintf("CUDA — %s (%d device(s))", gpu_name, cuda_device_count())
   } else {
     "CPU"
   }

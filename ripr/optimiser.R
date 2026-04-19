@@ -12,9 +12,9 @@ box::use(
     torch_logsumexp,
     torch_lr_step = lr_step
   ],
-  . / torch_settings[device, dtype],
-  . / tensor_ops[matmul_0_ninf, add_ninf_any],
-  . / multinomial[build_counts_tensor, mnom_logpmf]
+  ripr / torch_settings[device, dtype],
+  ripr / tensor_ops[matmul_0_ninf, add_ninf_any],
+  ripr / multinomial[build_counts_tensor, mnom_logpmf]
 )
 
 # Sample n rows from a Dirichlet(alpha) distribution.

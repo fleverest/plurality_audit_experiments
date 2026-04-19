@@ -8,8 +8,8 @@ box::use(
     torch_tensor,
     torch_logsumexp
   ],
-  . / torch_settings[device, dtype],
-  . / tensor_ops[matmul_0_ninf, add_ninf_any]
+  ripr / torch_settings[device, dtype],
+  ripr / tensor_ops[matmul_0_ninf, add_ninf_any]
 )
 
 #' All valid count vectors for a multinomial with m categories (GPU)

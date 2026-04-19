@@ -1,6 +1,6 @@
 box::use(
   torch[torch_isneginf, torch_where, torch_zeros_like, torch_matmul],
-  . / torch_settings[dtype]
+  ripr / torch_settings[dtype]
 )
 
 #' Matrix multiplication treating 0 × -Inf as 0

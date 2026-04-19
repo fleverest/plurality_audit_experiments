@@ -1,20 +1,29 @@
 box::use(
   torch[
-    optimizer, with_no_grad, is_undefined_tensor, nnf_softmax,
-    torch_randn, torch_full, torch_tensor, torch_zeros_like, torch_where,
+    optimizer,
+    with_no_grad,
+    is_undefined_tensor,
+    nnf_softmax,
+    torch_randn,
+    torch_full,
+    torch_tensor,
+    torch_zeros_like,
+    torch_where,
     torch_logsumexp,
     torch_lr_step = lr_step
   ],
-  ./torch_settings[device, dtype],
-  ./tensor_ops[matmul_0_ninf, add_ninf_any],
-  ./multinomial[build_counts_tensor, mnom_logpmf]
+  . / torch_settings[device, dtype],
+  . / tensor_ops[matmul_0_ninf, add_ninf_any],
+  . / multinomial[build_counts_tensor, mnom_logpmf]
 )
 
 # Sample n rows from a Dirichlet(alpha) distribution.
 rdirichlet <- function(n, alpha) {
-  k       <- length(alpha)
+  k <- length(alpha)
   samples <- matrix(0, nrow = n, ncol = k)
-  for (i in seq_len(k)) samples[, i] <- rgamma(n, shape = alpha[i], rate = 1)
+  for (i in seq_len(k)) {
+    samples[, i] <- rgamma(n, shape = alpha[i], rate = 1)
+  }
   samples / rowSums(samples)
 }
 
@@ -39,21 +48,25 @@ optim_frank_wolfe <- optimizer(
   step = function(closure = NULL) {
     private$iteration <- private$iteration + 1
     loss <- NULL
-    if (!is.null(closure)) loss <- closure()
+    if (!is.null(closure)) {
+      loss <- closure()
+    }
 
     with_no_grad({
       for (group in self$param_groups) {
         for (param in group$params) {
-          if (is.null(param$grad) || is_undefined_tensor(param$grad)) next
+          if (is.null(param$grad) || is_undefined_tensor(param$grad)) {
+            next
+          }
           grad <- param$grad
 
           if (length(param$shape) == 1) {
-            best_idx    <- grad$argmin()
-            s           <- torch_zeros_like(param)
+            best_idx <- grad$argmin()
+            s <- torch_zeros_like(param)
             s[best_idx] <- 1.0
           } else {
             best_idx <- grad$argmin(dim = 2, keepdim = TRUE)
-            s        <- torch_zeros_like(param)
+            s <- torch_zeros_like(param)
             s$scatter_(2, best_idx, 1.0)
           }
 
@@ -90,16 +103,16 @@ optim_projected_gd <- optimizer(
   },
 
   step = function(closure = NULL) {
-    param    <- self$param_groups[[1]]$params[[1]]
-    grad     <- param$grad
-    lr       <- self$param_groups[[1]]$lr
-    eps      <- self$param_groups[[1]]$eps
+    param <- self$param_groups[[1]]$params[[1]]
+    grad <- param$grad
+    lr <- self$param_groups[[1]]$lr
+    eps <- self$param_groups[[1]]$eps
     momentum <- self$param_groups[[1]]$momentum
 
-    grad_mean      <- grad$mean(dim = 2, keepdim = TRUE)
+    grad_mean <- grad$mean(dim = 2, keepdim = TRUE)
     grad_projected <- grad - grad_mean
 
-    at_boundary    <- param <= 0
+    at_boundary <- param <= 0
     grad_projected <- torch_where(
       at_boundary & (grad_projected > 0),
       torch_zeros_like(grad_projected),
@@ -162,36 +175,51 @@ optimize_mixture_weights <- function(
   log_ws,
   optim_fn,
   use_softmax = FALSE,
-  n_restarts  = 10,
-  tol         = 1e-6,
-  batch_size  = 1000,
-  n_batches   = 100,
-  eps         = 0.0,
+  n_restarts = 10,
+  tol = 1e-6,
+  batch_size = 1000,
+  n_batches = 100,
+  eps = 0.0,
   ...
 ) {
-  X   <- build_counts_tensor(n)
-  M_  <- X$size(1)
-  C_  <- log_ws$size(2)
-  T_  <- log_theta$size(2)
+  X <- build_counts_tensor(n)
+  M_ <- X$size(1)
+  C_ <- log_ws$size(2)
+  T_ <- log_theta$size(2)
 
-  log_pmf         <- mnom_logpmf(X, log_theta, n)
-  llr_num         <- matmul_0_ninf(X, log_q$unsqueeze(2))$squeeze(2)
+  log_pmf <- mnom_logpmf(X, log_theta, n)
+  llr_num <- matmul_0_ninf(X, log_q$unsqueeze(2))$squeeze(2)
   log_comp_denoms <- matmul_0_ninf(X, log_ws)
 
-  best_losses  <- torch_full(n_restarts, Inf, device = device, dtype = dtype)
-  best_weights <- torch_full(c(n_restarts, C_), 0, device = device, dtype = dtype)
+  best_losses <- torch_full(n_restarts, Inf, device = device, dtype = dtype)
+  best_weights <- torch_full(
+    c(n_restarts, C_),
+    0,
+    device = device,
+    dtype = dtype
+  )
 
-  max_iter       <- batch_size * n_batches
-  track_freq     <- 100
-  losses_history <- torch_full(c(ceiling(max_iter / track_freq), n_restarts), Inf, device = device, dtype = dtype)
+  max_iter <- batch_size * n_batches
+  track_freq <- 100
+  losses_history <- torch_full(
+    c(ceiling(max_iter / track_freq), n_restarts),
+    Inf,
+    device = device,
+    dtype = dtype
+  )
   current_losses <- losses_history[1, ]
 
   if (use_softmax) {
-    unconstrained_weights <- torch_randn(c(n_restarts, C_), device = device, dtype = dtype, requires_grad = FALSE)
-    optimizer             <- optim_fn(list(unconstrained_weights), ...)
+    unconstrained_weights <- torch_randn(
+      c(n_restarts, C_),
+      device = device,
+      dtype = dtype,
+      requires_grad = FALSE
+    )
+    optimizer <- optim_fn(list(unconstrained_weights), ...)
   } else {
-    weights   <- rdirichlet(n_restarts, rep(1, C_)) |>
-                   torch_tensor(device = device, dtype = dtype, requires_grad = FALSE)
+    weights <- rdirichlet(n_restarts, rep(1, C_)) |>
+      torch_tensor(device = device, dtype = dtype, requires_grad = FALSE)
     optimizer <- optim_fn(list(weights), ...)
   }
 
@@ -215,7 +243,7 @@ optimize_mixture_weights <- function(
           log_wts$unsqueeze(1)$expand(c(M_, n_restarts, C_))
         )
         llr_denom <- torch_logsumexp(log_denoms_expanded, dim = 3)
-        llr       <- llr_num$unsqueeze(2)$expand(c(M_, n_restarts)) - llr_denom
+        llr <- llr_num$unsqueeze(2)$expand(c(M_, n_restarts)) - llr_denom
 
         log_pmf_llr <- add_ninf_any(
           log_pmf$unsqueeze(3)$expand(c(M_, T_, n_restarts)),
@@ -223,29 +251,28 @@ optimize_mixture_weights <- function(
         )
         exp_llr <- torch_logsumexp(log_pmf_llr, dim = 1)$exp()
 
-        max_result     <- exp_llr$max(dim = 1)
+        max_result <- exp_llr$max(dim = 1)
         argmax_exp_llr <- max_result[[2]]
-        max_exp_llr    <- max_result[[1]]
+        max_exp_llr <- max_result[[1]]
 
-        prev_losses    <- current_losses
+        prev_losses <- current_losses
         current_losses <- max_exp_llr
-        improved       <- current_losses < best_losses
-        best_losses    <- torch_where(improved, current_losses, best_losses)
+        improved <- current_losses < best_losses
+        best_losses <- torch_where(improved, current_losses, best_losses)
         best_weights[improved, ] <- weights[improved, ]
         if (iter %% track_freq == 0) {
           losses_history[iter / track_freq, ] <- current_losses
         }
 
-        worst_log_pmf  <- log_pmf$index_select(2, argmax_exp_llr)
-        log_grad_terms <- (
-          worst_log_pmf$unsqueeze(3) +
+        worst_log_pmf <- log_pmf$index_select(2, argmax_exp_llr)
+        log_grad_terms <- (worst_log_pmf$unsqueeze(3) +
           llr$unsqueeze(3) +
           log_comp_denoms$unsqueeze(2) -
-          llr_denom$unsqueeze(3)
-        )
+          llr_denom$unsqueeze(3))
         grad_w <- -log_grad_terms$logsumexp(dim = 1)$exp()
         if (use_softmax) {
-          grad_u <- weights * (grad_w - (grad_w * weights)$sum(dim = 2, keepdim = TRUE))
+          grad_u <- weights *
+            (grad_w - (grad_w * weights)$sum(dim = 2, keepdim = TRUE))
         }
       })
 
@@ -262,7 +289,9 @@ optimize_mixture_weights <- function(
     cat(sprintf(
       "Batch %d: best=%.8f, worst=%.8f, mean=%.8f, lr=%.8f\n",
       batch_idx,
-      best_losses$min(), best_losses$max(), best_losses$mean(),
+      best_losses$min(),
+      best_losses$max(),
+      best_losses$mean(),
       optimizer$param_groups[[1]]$lr
     ))
 
@@ -276,8 +305,8 @@ optimize_mixture_weights <- function(
   }
 
   list(
-    best_weights   = best_weights,
-    best_losses    = best_losses,
+    best_weights = best_weights,
+    best_losses = best_losses,
     losses_history = losses_history
   )
 }
@@ -310,9 +339,9 @@ run_ripr <- function(
   ws,
   n_restarts,
   optim_fn,
-  batch_size  = 1000,
-  n_batches   = 250,
-  tol         = 1e-8,
+  batch_size = 1000,
+  n_batches = 250,
+  tol = 1e-8,
   use_softmax = TRUE,
   ...
 ) {
@@ -325,15 +354,15 @@ run_ripr <- function(
 
   optimize_mixture_weights(
     n,
-    log_theta   = to_log_tensor(thetas),
-    log_q       = torch_tensor(q, device = device, dtype = dtype)$log(),
-    log_ws      = to_log_tensor(ws),
-    optim_fn    = optim_fn,
+    log_theta = to_log_tensor(thetas),
+    log_q = torch_tensor(q, device = device, dtype = dtype)$log(),
+    log_ws = to_log_tensor(ws),
+    optim_fn = optim_fn,
     use_softmax = use_softmax,
-    n_restarts  = n_restarts,
-    batch_size  = batch_size,
-    n_batches   = n_batches,
-    tol         = tol,
+    n_restarts = n_restarts,
+    batch_size = batch_size,
+    n_batches = n_batches,
+    tol = tol,
     ...
   )
 }

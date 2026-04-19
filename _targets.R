@@ -10,6 +10,7 @@ box::use(
 
 gpu_controller <- crew_controller_slurm(
   name = "gpu",
+  host = nanonext::ip_addr()[2L],
   workers = 9L,
   options_cluster = crew_options_slurm(
     partition = "gpu",

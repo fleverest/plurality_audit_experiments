@@ -15,7 +15,7 @@ box::use(
 gpu_controller <- crew_controller_slurm(
   name = "gpu",
   host = nanonext::ip_addr()[2L], # Second IP address is reachable from other compute nodes on M3
-  workers = 9L,
+  workers = 2L, # QOSMaxGRESPerUser is 2 for me
   options_cluster = crew_options_slurm(
     partition = "gpu",
     time_minutes = 120L,

@@ -14,11 +14,11 @@ gpu_controller <- crew_controller_slurm(
   options_cluster = crew_options_slurm(
     partition = "gpu",
     time_minutes = 120L,
-    log_output = "logs/crew_%A.out",
-    log_error = "logs/crew_%A.err",
+    log_output = "logs/crew_%A_%a.out",
+    log_error = "logs/crew_%A_%a.err",
     script_lines = c(
       "#SBATCH --gres=gpu:A100:1",
-      "module load r"
+      "module load r cuda/12.6"
     )
   )
 )

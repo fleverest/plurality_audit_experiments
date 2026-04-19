@@ -11,11 +11,11 @@ box::use(
 gpu_controller <- crew_controller_slurm(
   name    = "gpu",
   workers = 9L,
-  options_cluster = crew_options_cluster(
+  options_cluster = crew_options_slurm(
+    partition    = "gpu",
+    time_minutes = 120L,
     script_lines = c(
-      "#SBATCH --partition=gpu",
       "#SBATCH --gres=gpu:A100:1",
-      "#SBATCH --time=02:00:00",
       "module load r",
       "module load cuda/12.6"
     )

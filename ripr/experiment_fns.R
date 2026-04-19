@@ -11,10 +11,27 @@ box::use(
 
 run_ripr_target <- function(n, n_restarts, thetas, q, ws) {
   emit_path <- sprintf("ripr/emits/experiment_n%03d.emit", n)
+  gpu_stats <- if (cuda_is_available()) {
+    function() {
+      tryCatch({
+        raw <- system2(
+          "nvidia-smi",
+          c("--query-gpu=utilization.gpu,memory.used,memory.total",
+            "--format=csv,noheader,nounits"),
+          stdout = TRUE
+        )[1L]
+        parts <- trimws(strsplit(raw, ",")[[1L]])
+        sprintf("[GPU %s%% | VRAM %s/%s MiB]", parts[1L], parts[2L], parts[3L])
+      }, error = function(e) "")
+    }
+  } else {
+    function() ""
+  }
   emit <- function(...) {
     cat(
       format(Sys.time(), "[%H:%M:%S]"),
       ...,
+      gpu_stats(),
       "\n",
       file = emit_path,
       append = TRUE

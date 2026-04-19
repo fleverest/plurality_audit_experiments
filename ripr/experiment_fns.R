@@ -4,7 +4,17 @@ box::use(
 )
 
 run_ripr_target <- function(n, n_restarts, thetas, q, ws) {
+  emit_path <- sprintf("ripr/emits/experiment_n%03d.emit", n)
+  emit <- function(...) {
+    cat(format(Sys.time(), "[%H:%M:%S]"), ..., "\n", file = emit_path, append = TRUE)
+  }
+
+  emit(sprintf("START | n=%d | n_restarts=%d | thetas=%d | ws=%d | q=(%s)",
+    n, n_restarts, length(thetas), length(ws),
+    paste(round(q, 4), collapse = ", ")))
+
   torch_manual_seed(sample.int(.Machine$integer.max, 1L))
+  emit("RNG seeded")
 
   device_info <- if (cuda_is_available()) {
     gpu_name <- tryCatch(
@@ -15,18 +25,13 @@ run_ripr_target <- function(n, n_restarts, thetas, q, ws) {
   } else {
     "CPU"
   }
-  message(sprintf(
-    "[run_ripr_target] n=%d | n_restarts=%d | thetas=%d | ws=%d | q=(%s) | device=%s",
-    n, n_restarts, length(thetas), length(ws),
-    paste(round(q, 4), collapse = ", "),
-    device_info
-  ))
+  emit("Device:", device_info)
 
-  optim_fn <- function(params, lr = 0.01, ...) {
-    optim_adam(params = params, lr = lr)
-  }
+  optim_fn <- function(params, lr = 0.01, ...) optim_adam(params = params, lr = lr)
 
+  emit("Calling run_ripr...")
   res <- run_ripr(
+    emit_fn = emit,
     n = n,
     thetas = thetas,
     q = q,
@@ -40,18 +45,18 @@ run_ripr_target <- function(n, n_restarts, thetas, q, ws) {
     tol = 1e-8,
     gamma = 0.95
   )
+  emit("run_ripr complete — converting results to arrays...")
 
   result <- list(
     best_weights = as.array(res$best_weights),
     best_losses = as.array(res$best_losses),
     losses_history = as.array(res$losses_history)
   )
+  emit("Conversion complete")
 
   rm(res)
-  gc()
-  if (cuda_is_available()) {
-    cuda_empty_cache()
-  }
+  if (cuda_is_available()) cuda_empty_cache()
 
+  emit("DONE")
   result
 }

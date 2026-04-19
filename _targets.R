@@ -2,7 +2,7 @@ library(targets)
 library(crew.cluster)
 
 box::use(
-  ripr / plots[plot_results_weights, plot_results_loss_history],
+  ripr / plots[plot_results_weights, plot_results_loss_history, plot_results_expectation_profile],
   ripr / grids[make_simplex_grid],
   ripr / experiment_fns[run_ripr_target]
 )
@@ -50,12 +50,17 @@ list(
     # plot/analysis targets are cheap — run in the orchestrator
     tar_target(
       plot_weights,
-      plot_results_weights(result$best_weights, result$best_losses, top = 50),
+      plot_results_weights(result$weights, result$final_loss, top = 50),
       deployment = "main"
     ),
     tar_target(
       plot_loss_history,
-      plot_results_loss_history(log(1 - result$losses_history)),
+      plot_results_loss_history(log(1 - result$loss_history)),
+      deployment = "main"
+    ),
+    tar_target(
+      plot_expectation_profile,
+      plot_results_expectation_profile(result$expectation_profile, result$final_loss, top = 50),
       deployment = "main"
     )
   )

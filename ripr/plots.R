@@ -2,13 +2,15 @@ box::use(
   ggplot2[
     ggplot,
     aes,
-    geom_tile,
+    geom_raster,
     geom_line,
-    scale_fill_viridis_c,
+    scale_fill_gradientn,
+    scale_x_discrete,
+    scale_y_discrete,
+    scale_y_log10,
     labs,
     theme_minimal,
-    theme,
-    scale_y_discrete
+    theme
   ],
   reshape2[melt],
   dplyr[filter, mutate]
@@ -42,8 +44,10 @@ plot_results_weights <- function(results_weights, results_losses, top = Inf) {
     filter(restart %in% utils::head(loss_order, top)) |>
     mutate(restart = factor(restart, levels = loss_order)) |>
     ggplot(aes(x = Component, y = restart, fill = Weight)) +
-    geom_tile() +
-    scale_fill_viridis_c() +
+    geom_raster() +
+    scale_fill_gradientn(
+      colours = c("#440154", "#3b528b", "#21918c", "#5ec962", "#fde725")
+    ) +
     labs(
       title = "Optimized Mixture Weights Across Random Restarts (Ordered by Loss)",
       x = "Mixture Component",
@@ -52,7 +56,18 @@ plot_results_weights <- function(results_weights, results_losses, top = Inf) {
     theme_minimal() +
     scale_y_discrete(
       limits = factor(utils::tail(rev(loss_order), top)),
-      labels = function(x) results_losses[as.numeric(as.character(x))]
+      labels = function(x) {
+        formatC(
+          results_losses[as.numeric(as.character(x))] - 1,
+          digits = 3,
+          format = "e"
+        )
+      }
+    ) +
+    scale_x_discrete(
+      breaks = function(x) {
+        x[round(seq(1, length(x), length.out = min(5L, length(x))))]
+      }
     )
 }
 
@@ -77,7 +92,7 @@ plot_results_loss_history <- function(results_loss_history) {
     variable.name = "Restart",
     value.name = "Loss"
   ) |>
-    ggplot(aes(x = Iteration, y = Loss, color = Restart)) +
+    ggplot(aes(x = Iteration, y = Loss - 1, group = Restart)) +
     geom_line(alpha = 0.7) +
     labs(
       title = "Loss Histories for Each Random Restart",
@@ -85,5 +100,67 @@ plot_results_loss_history <- function(results_loss_history) {
       y = "Max Expected LLR"
     ) +
     theme_minimal() +
-    theme(legend.position = "none")
+    theme(legend.position = "none") +
+    scale_y_log10()
+}
+
+#' Heatmap of expectation profile across DGPs per restart, ordered by loss
+#'
+#' Rows are restarts sorted by ascending loss (best at top); columns are DGP
+#' indices. Fill shows E_theta[Q(X)/P_w(X)] at the final weights for that restart.
+#'
+#' @param results_expectation_profile Matrix of shape (R, T) — expectation per
+#'   restart and DGP.
+#' @param results_losses Numeric vector of length R — best loss per restart.
+#' @param top Show only the `top` lowest-loss restarts. Default: all restarts.
+#' @return A ggplot object.
+#' @export
+plot_results_expectation_profile <- function(
+  results_expectation_profile,
+  results_losses,
+  top = Inf
+) {
+  profile_df <- as.data.frame(as.matrix(results_expectation_profile))
+  colnames(profile_df) <- seq_len(ncol(profile_df))
+  profile_df$restart <- seq_len(nrow(profile_df))
+
+  profile_melt <- melt(
+    profile_df,
+    id.vars = "restart",
+    variable.name = "Theta",
+    value.name = "Expectation"
+  )
+  profile_melt$Theta <- as.integer(as.character(profile_melt$Theta))
+
+  loss_order <- order(results_losses)
+
+  profile_melt |>
+    filter(restart %in% utils::head(loss_order, top)) |>
+    mutate(restart = factor(restart, levels = loss_order)) |>
+    ggplot(aes(x = Theta, y = restart, fill = Expectation)) +
+    geom_raster() +
+    scale_fill_gradientn(
+      colours = c("#440154", "#3b528b", "#21918c", "#5ec962", "#fde725")
+    ) +
+    labs(
+      title = "Expectation Profile Across DGPs per Restart (Ordered by Loss)",
+      x = "DGP Index",
+      y = "Loss achieved"
+    ) +
+    theme_minimal() +
+    scale_x_discrete(
+      breaks = function(x) {
+        x[round(seq(1, length(x), length.out = min(5L, length(x))))]
+      }
+    ) +
+    scale_y_discrete(
+      limits = factor(utils::tail(rev(loss_order), top)),
+      labels = function(x) {
+        formatC(
+          results_losses[as.numeric(as.character(x))] - 1,
+          digits = 3,
+          format = "e"
+        )
+      }
+    )
 }

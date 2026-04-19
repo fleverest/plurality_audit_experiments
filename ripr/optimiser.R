@@ -164,9 +164,11 @@ lr_step <- function(op, step_size, gamma, ...) {
 #' @param eps Minimum weight when not using softmax. Default: 0.
 #' @param ... Forwarded to `optim_fn` and `lr_step` (e.g. `lr`, `gamma`).
 #' @return List with components:
-#'   - `best_weights`: tensor of shape (R, C), best weights per restart.
-#'   - `best_losses`: tensor of shape (R,), best loss per restart.
-#'   - `losses_history`: tensor of shape (iterations/100, R).
+#'   - `weights`: tensor of shape (R, C), best weights per restart.
+#'   - `final_loss`: tensor of shape (R,), best loss achieved per restart.
+#'   - `loss_history`: tensor of shape (iterations/100, R).
+#'   - `expectation_profile`: tensor of shape (R, T), E_theta[Q(X)/P_w(X)] per
+#'     restart at final weights.
 #' @export
 optimize_mixture_weights <- function(
   n,
@@ -306,10 +308,26 @@ optimize_mixture_weights <- function(
     }
   }
 
+  with_no_grad({
+    log_wts_final <- best_weights$log()
+    log_denoms_final <- add_ninf_any(
+      log_comp_denoms$unsqueeze(2)$expand(c(M_, n_restarts, C_)),
+      log_wts_final$unsqueeze(1)$expand(c(M_, n_restarts, C_))
+    )
+    llr_denom_final <- torch_logsumexp(log_denoms_final, dim = 3)
+    llr_final <- llr_num$unsqueeze(2)$expand(c(M_, n_restarts)) - llr_denom_final
+    log_pmf_llr_final <- add_ninf_any(
+      log_pmf$unsqueeze(3)$expand(c(M_, T_, n_restarts)),
+      llr_final$unsqueeze(2)$expand(c(M_, T_, n_restarts))
+    )
+    expectation_profile <- torch_logsumexp(log_pmf_llr_final, dim = 1)$exp()$t()
+  })
+
   list(
-    best_weights = best_weights,
-    best_losses = best_losses,
-    losses_history = losses_history
+    weights = best_weights,
+    final_loss = best_losses,
+    loss_history = losses_history,
+    expectation_profile = expectation_profile
   )
 }
 
@@ -332,7 +350,7 @@ optimize_mixture_weights <- function(
 #' @param tol Convergence tolerance. Default: 1e-8.
 #' @param use_softmax Optimise in unconstrained space via softmax. Default: `TRUE`.
 #' @param ... Forwarded to `optim_fn` and the LR scheduler (e.g. `lr`, `gamma`).
-#' @return List with `best_weights`, `best_losses`, and `losses_history`.
+#' @return List with `weights`, `final_loss`, `loss_history`, and `expectation_profile`.
 #' @export
 run_ripr <- function(
   n,

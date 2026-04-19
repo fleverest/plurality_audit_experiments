@@ -48,9 +48,10 @@ run_ripr_target <- function(n, n_restarts, thetas, q, ws) {
   emit("run_ripr complete — converting results to arrays...")
 
   result <- list(
-    best_weights = as.array(res$best_weights),
-    best_losses = as.array(res$best_losses),
-    losses_history = as.array(res$losses_history)
+    weights = as.array(res$weights),
+    final_loss = as.array(res$final_loss),
+    loss_history = as.array(res$loss_history),
+    expectation_profile = as.array(res$expectation_profile)
   )
   emit("Conversion complete")
 

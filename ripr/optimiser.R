@@ -180,7 +180,7 @@ optimize_mixture_weights <- function(
   batch_size = 1000,
   n_batches = 100,
   eps = 0.0,
-  log_fn = message,
+  emit_fn = message,
   ...
 ) {
   X <- build_counts_tensor(n)
@@ -287,9 +287,10 @@ optimize_mixture_weights <- function(
 
     scheduler$step()
 
-    log_fn(sprintf(
+    emit_fn(sprintf(
       "Batch %03d/%03d: best=%.8f worst=%.8f mean=%.8f lr=%.2e",
-      batch_idx, n_batches,
+      batch_idx,
+      n_batches,
       best_losses$min()$item(),
       best_losses$max()$item(),
       best_losses$mean()$item(),
@@ -299,7 +300,7 @@ optimize_mixture_weights <- function(
     if (batch_idx > 1) {
       max_change <- (prev_losses - current_losses)$abs()$max()$item()
       if (max_change < tol) {
-        log_fn(sprintf("Converged at batch %03d", batch_idx))
+        emit_fn(sprintf("Converged at batch %03d", batch_idx))
         break
       }
     }
@@ -344,7 +345,7 @@ run_ripr <- function(
   n_batches = 250,
   tol = 1e-8,
   use_softmax = TRUE,
-  log_fn = message,
+  emit_fn = message,
   ...
 ) {
   to_log_tensor <- function(prob_list) {
@@ -365,7 +366,7 @@ run_ripr <- function(
     batch_size = batch_size,
     n_batches = n_batches,
     tol = tol,
-    log_fn = log_fn,
+    emit_fn = emit_fn,
     ...
   )
 }

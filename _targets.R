@@ -1,7 +1,6 @@
 library(targets)
 library(crew.cluster)
 
-options(box.path = getwd())
 box::use(
   ripr / plots[plot_results_weights, plot_results_loss_history],
   ripr / grids[make_simplex_grid],
@@ -10,7 +9,7 @@ box::use(
 
 gpu_controller <- crew_controller_slurm(
   name = "gpu",
-  host = nanonext::ip_addr()[2L],
+  host = nanonext::ip_addr()[2L], # Second IP address is reachable from other compute nodes on M3
   workers = 9L,
   options_cluster = crew_options_slurm(
     partition = "gpu",
@@ -44,7 +43,10 @@ list(
     values = n_config,
     names = "n",
     # result targets are dispatched to SLURM GPU jobs
-    tar_target(result, run_ripr_target(n, n_restarts, thetas, q, ws)),
+    tar_target(result, {
+      box::use(ripr / experiment_fns[run_ripr_target])
+      run_ripr_target(n, n_restarts, thetas, q, ws)
+    }),
     # plot/analysis targets are cheap — run in the orchestrator
     tar_target(
       plot_weights,

@@ -1,0 +1,18 @@
+# Data files
+data*
+*.csv
+*.txt
+*.gz
+*.zst
+*.npz
+*.Rds
+# Plots
+*.pdf
+*.png
+# Python environments
+.venv
+__pycache__
+# Logs
+log/*
+*.err
+*.out

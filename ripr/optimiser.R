@@ -315,7 +315,8 @@ optimize_mixture_weights <- function(
       log_wts_final$unsqueeze(1)$expand(c(M_, n_restarts, C_))
     )
     llr_denom_final <- torch_logsumexp(log_denoms_final, dim = 3)
-    llr_final <- llr_num$unsqueeze(2)$expand(c(M_, n_restarts)) - llr_denom_final
+    llr_final <- llr_num$unsqueeze(2)$expand(c(M_, n_restarts)) -
+      llr_denom_final
     log_pmf_llr_final <- add_ninf_any(
       log_pmf$unsqueeze(3)$expand(c(M_, T_, n_restarts)),
       llr_final$unsqueeze(2)$expand(c(M_, T_, n_restarts))

@@ -2,7 +2,12 @@ library(targets)
 library(crew.cluster)
 
 box::use(
-  ripr / plots[plot_results_weights, plot_results_loss_history, plot_results_expectation_profile],
+  ripr /
+    plots[
+      plot_results_weights,
+      plot_results_loss_history,
+      plot_results_expectation_profile
+    ],
   ripr / grids[make_simplex_grid],
   ripr / experiment_fns[run_ripr_target]
 )
@@ -60,7 +65,11 @@ list(
     ),
     tar_target(
       plot_expectation_profile,
-      plot_results_expectation_profile(result$expectation_profile, result$final_loss, top = 50),
+      plot_results_expectation_profile(
+        result$expectation_profile,
+        result$final_loss,
+        top = 50
+      ),
       deployment = "main"
     )
   )

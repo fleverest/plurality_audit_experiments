@@ -9,6 +9,8 @@ data*
 # Plots
 *.pdf
 *.png
+# Torch backend
+.torch
 # Python environments
 .venv
 __pycache__

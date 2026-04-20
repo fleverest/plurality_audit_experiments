@@ -18,7 +18,7 @@ gpu_controller <- crew_controller_slurm(
   workers = 2L, # QOSMaxGRESPerUser is 2 for me
   options_cluster = crew_options_slurm(
     partition = "gpu",
-    time_minutes = 120L,
+    time_minutes = 240L,
     log_output = "logs/crew_%A_%a.out",
     log_error = "logs/crew_%A_%a.err",
     script_lines = c(
@@ -34,8 +34,8 @@ tar_option_set(
 )
 
 n_config <- data.frame(
-  n = c(1:5, 10, 20, 50, 100),
-  n_restarts = c(rep(100L, 5), rep(50L, 4))
+  n = c(1L:5L, 10L, 20L, 50L, 100L),
+  n_restarts = c(rep(200L, 5), rep(100L, 3), 25L) # Fewer resarts for large n
 )
 
 list(

@@ -156,8 +156,6 @@ lr_step <- function(op, step_size, gamma, ...) {
 #' @param use_softmax If `TRUE`, optimise unconstrained logits and apply softmax
 #'   before each forward pass. Default: `FALSE`.
 #' @param n_restarts Number of parallel random restarts. Default: 10.
-#' @param tol Convergence threshold on max absolute loss change across restarts.
-#'   Default: 1e-6.
 #' @param batch_size Iterations per batch (also the LR scheduler step interval).
 #'   Default: 1000.
 #' @param n_batches Maximum number of batches. Default: 100.
@@ -178,7 +176,6 @@ optimize_mixture_weights <- function(
   optim_fn,
   use_softmax = FALSE,
   n_restarts = 10,
-  tol = 1e-6,
   batch_size = 1000,
   n_batches = 100,
   eps = 0.0,
@@ -298,14 +295,6 @@ optimize_mixture_weights <- function(
       best_losses$mean()$item(),
       optimizer$param_groups[[1]]$lr
     ))
-
-    if (batch_idx > 1) {
-      max_change <- (prev_losses - current_losses)$abs()$max()$item()
-      if (max_change < tol) {
-        emit_fn(sprintf("Converged at batch %03d", batch_idx))
-        break
-      }
-    }
   }
 
   with_no_grad({
@@ -348,7 +337,6 @@ optimize_mixture_weights <- function(
 #' @param optim_fn Optimizer constructor. Called as `optim_fn(params, ...)`.
 #' @param batch_size Iterations per batch. Default: 1000.
 #' @param n_batches Maximum number of batches. Default: 250.
-#' @param tol Convergence tolerance. Default: 1e-8.
 #' @param use_softmax Optimise in unconstrained space via softmax. Default: `TRUE`.
 #' @param ... Forwarded to `optim_fn` and the LR scheduler (e.g. `lr`, `gamma`).
 #' @return List with `weights`, `final_loss`, `loss_history`, and `expectation_profile`.
@@ -362,7 +350,6 @@ run_ripr <- function(
   optim_fn,
   batch_size = 1000,
   n_batches = 250,
-  tol = 1e-8,
   use_softmax = TRUE,
   emit_fn = message,
   ...
@@ -384,7 +371,6 @@ run_ripr <- function(
     n_restarts = n_restarts,
     batch_size = batch_size,
     n_batches = n_batches,
-    tol = tol,
     emit_fn = emit_fn,
     ...
   )

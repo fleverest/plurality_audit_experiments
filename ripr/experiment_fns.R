@@ -92,7 +92,6 @@ run_ripr_target <- function(n, n_restarts, thetas, q, ws) {
     lr = 1.0,
     batch_size = 1000,
     n_batches = 250,
-    tol = 1e-8,
     gamma = 0.95
   )
   emit("run_ripr complete — converting results to arrays...")

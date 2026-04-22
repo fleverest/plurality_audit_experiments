@@ -9,8 +9,7 @@ box::use(
     torch_tensor,
     torch_zeros_like,
     torch_where,
-    torch_logsumexp,
-    torch_lr_step = lr_step
+    torch_logsumexp
   ],
   ripr / torch_settings[device, dtype],
   ripr / tensor_ops[matmul_0_ninf, add_ninf_any],
@@ -135,11 +134,6 @@ optim_projected_gd <- optimizer(
   private = list(momentum_buffer = NULL)
 )
 
-# Thin wrapper so callers pass `gamma` rather than knowing torch's lr_step API.
-lr_step <- function(op, step_size, gamma, ...) {
-  torch_lr_step(op, step_size = step_size, gamma = gamma)
-}
-
 #' Minimise max_theta E_theta[Q(X)/P_w(X)] over mixture weights via parallel restarts
 #'
 #' Runs `n_restarts` simultaneous gradient-descent optimisations from random
@@ -152,19 +146,21 @@ lr_step <- function(op, step_size, gamma, ...) {
 #' @param log_q Tensor of shape (m,) — log numerator probabilities.
 #' @param log_ws Tensor of shape (m, C) — log mixture component probabilities.
 #' @param optim_fn Optimizer constructor, e.g. `optim_adam` or
-#'   [optim_frank_wolfe()]. Called as `optim_fn(params, ...)`.
+#'   [optim_frank_wolfe()]. Called as `optim_fn(params)`.
+#' @param sched_fn Scheduler constructor returning a `torch::lr_scheduler`
+#'   object, or `NULL` for no scheduling. Default: `NULL`.
 #' @param use_softmax If `TRUE`, optimise unconstrained logits and apply softmax
 #'   before each forward pass. Default: `FALSE`.
 #' @param n_restarts Number of parallel random restarts. Default: 10.
-#' @param batch_size Iterations per batch (also the LR scheduler step interval).
-#'   Default: 1000.
+#' @param batch_size Iterations per batch. Default: 1000.
 #' @param n_batches Maximum number of batches. Default: 100.
-#' @param eps Minimum weight when not using softmax. Default: 0.
-#' @param ... Forwarded to `optim_fn` and `lr_step` (e.g. `lr`, `gamma`).
+#' @param track_freq Record loss and LR every this many iterations. Default: 100.
 #' @return List with components:
 #'   - `weights`: tensor of shape (R, C), best weights per restart.
 #'   - `final_loss`: tensor of shape (R,), best loss achieved per restart.
-#'   - `loss_history`: tensor of shape (iterations/100, R).
+#'   - `loss_history`: tensor of shape (ceil(max_iter/track_freq), R).
+#'   - `lr_history`: numeric vector of length ceil(max_iter/track_freq), LR at
+#'     each tracked iteration.
 #'   - `expectation_profile`: tensor of shape (R, T), E_theta[Q(X)/P_w(X)] per
 #'     restart at final weights.
 #' @export
@@ -174,13 +170,13 @@ optimize_mixture_weights <- function(
   log_q,
   log_ws,
   optim_fn,
-  use_softmax = FALSE,
+  sched_fn = NULL,
+  use_softmax = TRUE,
   n_restarts = 10,
   batch_size = 1000,
   n_batches = 100,
-  eps = 0.0,
-  emit_fn = message,
-  ...
+  track_freq = 100L,
+  emit_fn = message
 ) {
   X <- build_counts_tensor(n)
   M_ <- X$size(1)
@@ -200,13 +196,14 @@ optimize_mixture_weights <- function(
   )
 
   max_iter <- batch_size * n_batches
-  track_freq <- 100
+  n_snapshots <- ceiling(max_iter / track_freq)
   losses_history <- torch_full(
-    c(ceiling(max_iter / track_freq), n_restarts),
+    c(n_snapshots, n_restarts),
     Inf,
     device = device,
     dtype = dtype
   )
+  lr_history <- numeric(n_snapshots)
   current_losses <- losses_history[1, ]
 
   if (use_softmax) {
@@ -216,14 +213,16 @@ optimize_mixture_weights <- function(
       dtype = dtype,
       requires_grad = FALSE
     )
-    optimizer <- optim_fn(list(unconstrained_weights), ...)
+    optimizer <- optim_fn(list(unconstrained_weights))
   } else {
     weights <- rdirichlet(n_restarts, rep(1, C_)) |>
       torch_tensor(device = device, dtype = dtype, requires_grad = FALSE)
-    optimizer <- optim_fn(list(weights), ...)
+    optimizer <- optim_fn(list(weights))
   }
 
-  scheduler <- lr_step(optimizer, step_size = 1, ...)
+  if (!is.null(sched_fn)) {
+    scheduler <- sched_fn(optimizer)
+  }
 
   for (batch_idx in seq_len(n_batches)) {
     for (i in seq_len(batch_size)) {
@@ -255,13 +254,14 @@ optimize_mixture_weights <- function(
         argmax_exp_llr <- max_result[[2]]
         max_exp_llr <- max_result[[1]]
 
-        prev_losses <- current_losses
         current_losses <- max_exp_llr
         improved <- current_losses < best_losses
         best_losses <- torch_where(improved, current_losses, best_losses)
         best_weights[improved, ] <- weights[improved, ]
         if (iter %% track_freq == 0) {
-          losses_history[iter / track_freq, ] <- current_losses
+          idx <- iter / track_freq
+          losses_history[idx, ] <- current_losses
+          lr_history[[idx]] <- optimizer$param_groups[[1]]$lr
         }
 
         worst_log_pmf <- log_pmf$index_select(2, argmax_exp_llr)
@@ -284,15 +284,18 @@ optimize_mixture_weights <- function(
       optimizer$step()
     }
 
-    scheduler$step()
+    # Step the scheduler after each batch
+    if (!is.null(sched_fn)) {
+      scheduler$step()
+    }
 
     emit_fn(sprintf(
-      "Batch %03d/%03d: best=%.8f worst=%.8f mean=%.8f lr=%.2e",
+      "Batch %03d/%03d: best=%.6f current_best=%.6f current_mean=%.6f lr=%.2e",
       batch_idx,
       n_batches,
       best_losses$min()$item(),
-      best_losses$max()$item(),
-      best_losses$mean()$item(),
+      current_losses$min()$item(),
+      current_losses$mean()$item(),
       optimizer$param_groups[[1]]$lr
     ))
   }
@@ -317,6 +320,7 @@ optimize_mixture_weights <- function(
     weights = best_weights,
     final_loss = best_losses,
     loss_history = losses_history,
+    lr_history = lr_history,
     expectation_profile = expectation_profile
   )
 }
@@ -334,12 +338,15 @@ optimize_mixture_weights <- function(
 #' @param ws R list of numeric vectors — mixture component grid, e.g. from
 #'   [make_simplex_grid()].
 #' @param n_restarts Number of parallel random restarts.
-#' @param optim_fn Optimizer constructor. Called as `optim_fn(params, ...)`.
+#' @param optim_fn Optimizer constructor. Called as `optim_fn(params)`.
+#' @param sched_fn Scheduler constructor returning a `torch::lr_scheduler`
+#'   object, or `NULL` for no scheduling. Default: `NULL`.
 #' @param batch_size Iterations per batch. Default: 1000.
 #' @param n_batches Maximum number of batches. Default: 250.
+#' @param track_freq Record loss and LR every this many iterations. Default: 100.
 #' @param use_softmax Optimise in unconstrained space via softmax. Default: `TRUE`.
-#' @param ... Forwarded to `optim_fn` and the LR scheduler (e.g. `lr`, `gamma`).
-#' @return List with `weights`, `final_loss`, `loss_history`, and `expectation_profile`.
+#' @return List with `weights`, `final_loss`, `loss_history`, `lr_history`, and
+#'   `expectation_profile`.
 #' @export
 run_ripr <- function(
   n,
@@ -348,11 +355,12 @@ run_ripr <- function(
   ws,
   n_restarts,
   optim_fn,
+  sched_fn = NULL,
   batch_size = 1000,
   n_batches = 250,
+  track_freq = 100L,
   use_softmax = TRUE,
-  emit_fn = message,
-  ...
+  emit_fn = message
 ) {
   to_log_tensor <- function(prob_list) {
     do.call(what = rbind, args = prob_list) |>
@@ -367,11 +375,12 @@ run_ripr <- function(
     log_q = torch_tensor(q, device = device, dtype = dtype)$log(),
     log_ws = to_log_tensor(ws),
     optim_fn = optim_fn,
+    sched_fn = sched_fn,
     use_softmax = use_softmax,
     n_restarts = n_restarts,
     batch_size = batch_size,
     n_batches = n_batches,
-    emit_fn = emit_fn,
-    ...
+    track_freq = track_freq,
+    emit_fn = emit_fn
   )
 }

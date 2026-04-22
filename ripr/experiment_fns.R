@@ -4,12 +4,22 @@ box::use(
     cuda_device_count,
     cuda_empty_cache,
     torch_manual_seed,
-    optim_adam
+    optim_adam,
+    lr_cosine_annealing,
+    lr_step
   ],
   ripr / optimiser[run_ripr]
 )
 
-run_ripr_target <- function(n, n_restarts, thetas, q, ws) {
+run_ripr_target <- function(
+  n,
+  n_restarts,
+  thetas,
+  q,
+  ws,
+  sched = "step",
+  optim = "adam"
+) {
   emit_path <- sprintf("ripr/emits/experiment_n%03d.emit", n)
   gpu_stats <- if (cuda_is_available()) {
     function() {
@@ -75,8 +85,27 @@ run_ripr_target <- function(n, n_restarts, thetas, q, ws) {
   }
   emit("Device:", device_info)
 
-  optim_fn <- function(params, lr = 0.01, ...) {
-    optim_adam(params = params, lr = lr)
+  optim_fn <- if (optim == "adam") {
+    optim_adam
+  } else {
+    stop("Unknown optimizer")
+  }
+
+  batch_size <- 1000
+  n_batches <- 250
+  iterations <- batch_size * n_batches
+
+  sched_fn <- if (sched == "step") {
+    function(optimizer) {
+      # Step once per batch
+      lr_step(optimizer, step_size = batch_size)
+    }
+  } else if (sched == "cosine") {
+    function(optimizer) {
+      lr_cosine_annealing(optimizer, T_max = iterations)
+    }
+  } else {
+    stop("Unknown scheduler type")
   }
 
   emit("Calling run_ripr...")
@@ -88,11 +117,10 @@ run_ripr_target <- function(n, n_restarts, thetas, q, ws) {
     ws = ws,
     n_restarts = n_restarts,
     optim_fn = optim_fn,
+    sched_fn = sched_fn,
     use_softmax = TRUE,
-    lr = 1.0,
-    batch_size = 1000,
-    n_batches = 250,
-    gamma = 0.95
+    batch_size = batch_size,
+    n_batches = n_batches
   )
   emit("run_ripr complete — converting results to arrays...")
 

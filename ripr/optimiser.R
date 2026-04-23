@@ -134,7 +134,7 @@ optim_projected_gd <- optimizer(
   private = list(momentum_buffer = NULL)
 )
 
-#' Minimise max_theta E_theta[Q(X)/P_w(X)] over mixture weights via parallel restarts
+#' Minimise sum_theta max(0, E_theta[Q(X)/P_w(X)] - 1) over mixture weights via parallel restarts
 #'
 #' Runs `n_restarts` simultaneous gradient-descent optimisations from random
 #' Dirichlet initialisations. Pre-computes the count tensor, log-PMFs, and
@@ -249,26 +249,21 @@ optimize_mixture_weights <- function(
         )
         exp_llr <- torch_logsumexp(log_pmf_llr, dim = 1)$exp()
 
-        max_result <- exp_llr$max(dim = 1)
-        argmax_exp_llr <- max_result[[2]]
-        max_exp_llr <- max_result[[1]]
+        max_exp_llr <- exp_llr$max(dim = 1L)[[1]]
+        above_mask <- exp_llr > 1
+        current_losses <- (exp_llr - 1)$clamp(min = 0)$sum(dim = 1L)
 
-        current_losses <- max_exp_llr
         improved <- current_losses < best_losses
         best_losses <- torch_where(improved, current_losses, best_losses)
         best_weights[improved, ] <- weights[improved, ]
         if (iter %% track_freq == 0) {
           idx <- iter / track_freq
           losses_history[idx, ] <- current_losses
-          lr_history[[idx]] <- if (!is.null(sched_step)) {
-            optimizer$param_groups[[1]]$lr
-          } else {
-            NA_real_
-          }
+          lr_history[idx] <- optimizer$param_groups[[1]]$lr
         }
 
-        worst_log_pmf <- log_pmf$index_select(2, argmax_exp_llr)
-        log_grad_terms <- (worst_log_pmf$unsqueeze(3) +
+        active_pmf_sum <- log_pmf$exp()$matmul(above_mask$to(dtype = dtype))
+        log_grad_terms <- (active_pmf_sum$log()$unsqueeze(3) +
           llr$unsqueeze(3) +
           log_comp_denoms$unsqueeze(2) -
           llr_denom$unsqueeze(3))
@@ -291,13 +286,18 @@ optimize_mixture_weights <- function(
     }
 
     emit_fn(sprintf(
-      "Batch %03d/%03d: best=%.6f current_best=%.6f current_mean=%.6f lr=%.2e",
+      "Batch %03d/%03d: best_so_far=%.6f best_now=%.6f best_exp_now=%.6f lr=%.2e norm=%.3f",
       batch_idx,
       n_batches,
       best_losses$min()$item(),
       current_losses$min()$item(),
-      current_losses$mean()$item(),
-      utils::tail(lr_history, 1)
+      max_exp_llr$min()$item(),
+      if (!is.null(sched_step)) optimizer$param_groups[[1]]$lr else NA_real_,
+      if (use_softmax) {
+        unconstrained_weights$norm(dim = 2L)$mean()$item()
+      } else {
+        NA_real_
+      }
     ))
   }
 

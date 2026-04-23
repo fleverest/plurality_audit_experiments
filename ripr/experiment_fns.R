@@ -6,6 +6,7 @@ box::use(
     torch_manual_seed,
     optim_adam,
     lr_cosine_annealing,
+    lr_reduce_on_plateau,
     lr_step
   ],
   ripr / optimiser[run_ripr]
@@ -17,7 +18,7 @@ run_ripr_target <- function(
   thetas,
   q,
   ws,
-  sched = "step",
+  sched = "null",
   optim = "adam"
 ) {
   emit_path <- sprintf("ripr/emits/experiment_n%03d.emit", n)
@@ -95,14 +96,31 @@ run_ripr_target <- function(
   n_batches <- 250
   iterations <- batch_size * n_batches
 
-  sched_fn <- if (sched == "step") {
+  sched_fn <- if (sched == "null") {
+    NULL
+  } else if (sched == "step") {
     function(optimizer) {
-      # Step once per batch
-      lr_step(optimizer, step_size = batch_size)
+      sched <- lr_step(optimizer, step_size = 1, gamma = 0.001^(1 / n_batches))
+      function(loss) sched$step()
     }
   } else if (sched == "cosine") {
     function(optimizer) {
-      lr_cosine_annealing(optimizer, T_max = iterations)
+      sched <- lr_cosine_annealing(
+        optimizer,
+        T_max = n_batches,
+        eta_min = 0.001
+      )
+      function(loss) sched$step()
+    }
+  } else if (sched == "plateau") {
+    function(optimizer) {
+      sched <- lr_reduce_on_plateau(
+        optimizer,
+        patience = 5,
+        factor = 0.5,
+        min_lr = 1e-4
+      )
+      function(loss) sched$step(loss)
     }
   } else {
     stop("Unknown scheduler type")

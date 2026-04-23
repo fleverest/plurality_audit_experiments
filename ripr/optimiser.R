@@ -147,8 +147,9 @@ optim_projected_gd <- optimizer(
 #' @param log_ws Tensor of shape (m, C) — log mixture component probabilities.
 #' @param optim_fn Optimizer constructor, e.g. `optim_adam` or
 #'   [optim_frank_wolfe()]. Called as `optim_fn(params)`.
-#' @param sched_fn Scheduler constructor returning a `torch::lr_scheduler`
-#'   object, or `NULL` for no scheduling. Default: `NULL`.
+#' @param sched_fn Function taking an optimizer and returning a step closure
+#'   `function(loss)`. Called every iteration after `optimizer$step()`. `NULL`
+#'   disables scheduling. Default: `NULL`.
 #' @param use_softmax If `TRUE`, optimise unconstrained logits and apply softmax
 #'   before each forward pass. Default: `FALSE`.
 #' @param n_restarts Number of parallel random restarts. Default: 10.
@@ -220,9 +221,7 @@ optimize_mixture_weights <- function(
     optimizer <- optim_fn(list(weights))
   }
 
-  if (!is.null(sched_fn)) {
-    scheduler <- sched_fn(optimizer)
-  }
+  sched_step <- if (!is.null(sched_fn)) sched_fn(optimizer) else NULL
 
   for (batch_idx in seq_len(n_batches)) {
     for (i in seq_len(batch_size)) {
@@ -261,7 +260,11 @@ optimize_mixture_weights <- function(
         if (iter %% track_freq == 0) {
           idx <- iter / track_freq
           losses_history[idx, ] <- current_losses
-          lr_history[[idx]] <- optimizer$param_groups[[1]]$lr
+          lr_history[[idx]] <- if (!is.null(sched_step)) {
+            optimizer$param_groups[[1]]$lr
+          } else {
+            NA_real_
+          }
         }
 
         worst_log_pmf <- log_pmf$index_select(2, argmax_exp_llr)
@@ -282,11 +285,9 @@ optimize_mixture_weights <- function(
         weights$grad <- grad_w
       }
       optimizer$step()
-    }
-
-    # Step the scheduler after each batch
-    if (!is.null(sched_fn)) {
-      scheduler$step()
+      if (!is.null(sched_step)) {
+        sched_step(current_losses$min()$item())
+      }
     }
 
     emit_fn(sprintf(
@@ -296,7 +297,7 @@ optimize_mixture_weights <- function(
       best_losses$min()$item(),
       current_losses$min()$item(),
       current_losses$mean()$item(),
-      optimizer$param_groups[[1]]$lr
+      utils::tail(lr_history, 1)
     ))
   }
 
@@ -339,8 +340,8 @@ optimize_mixture_weights <- function(
 #'   [make_simplex_grid()].
 #' @param n_restarts Number of parallel random restarts.
 #' @param optim_fn Optimizer constructor. Called as `optim_fn(params)`.
-#' @param sched_fn Scheduler constructor returning a `torch::lr_scheduler`
-#'   object, or `NULL` for no scheduling. Default: `NULL`.
+#' @param sched_fn Function taking an optimizer and returning a step closure
+#'   `function(loss)`. See [optimize_mixture_weights()] for details. Default: `NULL`.
 #' @param batch_size Iterations per batch. Default: 1000.
 #' @param n_batches Maximum number of batches. Default: 250.
 #' @param track_freq Record loss and LR every this many iterations. Default: 100.

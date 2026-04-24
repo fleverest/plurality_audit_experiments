@@ -28,68 +28,142 @@ rdirichlet <- function(n, alpha) {
   samples / rowSums(samples)
 }
 
+# Golden section search for the minimum of a convex function f on [lo, hi].
+gss <- function(f, lo, hi, tol = 1e-6) {
+  phi <- (sqrt(5) - 1) / 2
+  x1 <- hi - phi * (hi - lo)
+  x2 <- lo + phi * (hi - lo)
+  f1 <- f(x1)
+  f2 <- f(x2)
+  while ((hi - lo) > tol) {
+    if (f1 < f2) {
+      hi <- x2; x2 <- x1; f2 <- f1
+      x1 <- hi - phi * (hi - lo); f1 <- f(x1)
+    } else {
+      lo <- x1; x1 <- x2; f1 <- f2
+      x2 <- lo + phi * (hi - lo); f2 <- f(x2)
+    }
+  }
+  (lo + hi) / 2
+}
+
 #' Frank-Wolfe optimizer for simplex-constrained mixture weights
 #'
 #' Each step finds the simplex vertex minimising the inner product with the
-#' gradient, then moves toward it with an adaptive step size
-#' `(c / (t + c))^alpha`. Supports batched simplexes of shape (R, C).
+#' gradient (the FW direction), then moves toward it. Supports batched
+#' simplexes of shape (R, C).
+#'
+#' Step size: by default uses the schedule `(step / (t + step))^alpha`.
+#' When `line_search = TRUE` and `eval_fn` is passed to `$step()`, uses golden
+#' section search for the exact minimiser along the FW direction instead.
+#' For batched (R, C) params the line search minimises the SUM of losses across
+#' restarts, so all restarts share the same γ at each iteration.
 #'
 #' @param params List of tensors to optimise.
-#' @param step Step-size constant c. Default: 2.0.
-#' @param alpha Step-size decay exponent. Default: 1.0.
-#' @param ... Ignored (for compatible signatures).
+#' @param step Step-size constant c (schedule mode only). Default: 2.0.
+#' @param alpha Step-size decay exponent (schedule mode only). Default: 1.0.
+#' @param pairwise If `TRUE`, use the pairwise FW variant. Default: `FALSE`.
+#' @param line_search If `TRUE`, use golden section search instead of the
+#'   schedule. Requires `eval_fn` to be passed to `$step()`. Default: `FALSE`.
+#' @param ls_tol Convergence tolerance for the golden section search. Default: 1e-6.
+#' @param ... Ignored.
 #' @export
 optim_frank_wolfe <- optimizer(
-  initialize = function(params, step = 2.0, alpha = 1.0, pairwise = FALSE, ...) {
-    defaults <- list(step = step, alpha = alpha, pairwise = pairwise)
+  initialize = function(params, step = 2.0, alpha = 1.0, pairwise = FALSE,
+                        line_search = FALSE, ls_tol = 1e-6, ...) {
+    defaults <- list(
+      step = step, alpha = alpha, pairwise = pairwise,
+      line_search = line_search, ls_tol = ls_tol
+    )
     super$initialize(params, defaults)
     private$iteration <- 0
   },
 
-  step = function(closure = NULL) {
+  step = function(closure = NULL, eval_fn = NULL) {
     private$iteration <- private$iteration + 1
     loss <- NULL
-    if (!is.null(closure)) {
-      loss <- closure()
-    }
+    if (!is.null(closure)) loss <- closure()
 
     with_no_grad({
       for (group in self$param_groups) {
         for (param in group$params) {
-          if (is.null(param$grad) || is_undefined_tensor(param$grad)) {
-            next
-          }
+          if (is.null(param$grad) || is_undefined_tensor(param$grad)) next
           grad <- param$grad
-          gamma <- (group$step / (private$iteration + group$step))^group$alpha
+          use_ls <- group$line_search && !is.null(eval_fn)
 
           if (length(param$shape) == 1) {
+            # 1-D case: single simplex of shape (C,)
             best_idx <- grad$argmin()
+            s <- torch_zeros_like(param)
+            s[best_idx] <- 1.0
+
             if (group$pairwise) {
               grad_support <- torch_where(param > 0, grad, torch_full_like(grad, -Inf))
               away_idx <- grad_support$argmax()
-              gamma <- min(gamma, param[away_idx]$item())
+              gamma_max <- param[away_idx]$item()
               d <- torch_zeros_like(param)
               d[best_idx] <- 1.0
               d[away_idx] <- d[away_idx] - 1.0
+              gamma <- if (use_ls) {
+                gss(
+                  function(g) eval_fn((param + g * d)$log())$losses$sum()$item(),
+                  0, gamma_max, tol = group$ls_tol
+                )
+              } else {
+                min((group$step / (private$iteration + group$step))^group$alpha, gamma_max)
+              }
               param$add_(d, alpha = gamma)
             } else {
-              s <- torch_zeros_like(param)
-              s[best_idx] <- 1.0
+              gamma <- if (use_ls) {
+                gss(
+                  function(g) eval_fn(((1 - g) * param + g * s)$log())$losses$sum()$item(),
+                  0, 1, tol = group$ls_tol
+                )
+              } else {
+                (group$step / (private$iteration + group$step))^group$alpha
+              }
               param$mul_(1 - gamma)$add_(s, alpha = gamma)
             }
           } else {
+            # 2-D batched case: shape (R, C)
             best_idx <- grad$argmin(dim = 2, keepdim = TRUE)
+            s <- torch_zeros_like(param)
+            s$scatter_(2, best_idx, 1.0)
+
             if (group$pairwise) {
               grad_support <- torch_where(param > 0, grad, torch_full_like(grad, -Inf))
               away_idx <- grad_support$argmax(dim = 2, keepdim = TRUE)
-              gamma_eff <- param$gather(2, away_idx)$clamp(max = gamma)
               d <- torch_zeros_like(param)
               d$scatter_(2, best_idx, 1.0)
               d$scatter_add_(2, away_idx, torch_full_like(param$gather(2, away_idx), -1.0))
+
+              if (use_ls) {
+                # Clamp each restart's step to its own away weight, so all
+                # remain on the simplex. Search over [0,1]; each f_r is still
+                # convex (decreasing-then-flat), so the sum is convex in g.
+                gamma_max_r <- param$gather(2, away_idx)  # (R, 1)
+                gamma <- gss(
+                  function(g) {
+                    gamma_eff <- gamma_max_r$clamp(max = g)
+                    eval_fn((param + gamma_eff * d)$log())$losses$sum()$item()
+                  },
+                  0, 1, tol = group$ls_tol
+                )
+                param$add_(d * gamma_max_r$clamp(max = gamma))
+              } else {
+                gamma <- (group$step / (private$iteration + group$step))^group$alpha
+                gamma_eff <- param$gather(2, away_idx)$clamp(max = gamma)
                 param$add_(d * gamma_eff)
+              }
             } else {
-              s <- torch_zeros_like(param)
-              s$scatter_(2, best_idx, 1.0)
+              gamma <- if (use_ls) {
+                gss(
+                  function(g) eval_fn(((1 - g) * param + g * s)$log())$losses$sum()$item(),
+                  0, 1, tol = group$ls_tol
+                )
+              } else {
+                (group$step / (private$iteration + group$step))^group$alpha
+              }
               param$mul_(1 - gamma)$add_(s, alpha = gamma)
             }
           }

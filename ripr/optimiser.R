@@ -102,6 +102,51 @@ optim_frank_wolfe <- optimizer(
   private = list(iteration = NULL)
 )
 
+#' Mirror descent (multiplicative weights) optimizer for simplex-constrained mixture weights
+#'
+#' Each step applies the multiplicative-weights update:
+#'   w ← w * exp(-lr * ∇f(w)) / Z
+#' where Z is the normalisation constant. This is mirror descent with KL
+#' divergence as the Bregman divergence, and naturally keeps iterates in the
+#' relative interior of the simplex (no weight ever reaches exactly zero).
+#' Unlike Frank-Wolfe, the update is dense at every step, making it well-suited
+#' when the optimum is an interior point.
+#'
+#' @param params List containing a single tensor of shape (R, C) or (C,).
+#' @param lr Learning rate. Default: 0.01.
+#' @param ... Ignored.
+#' @export
+optim_mirror_descent <- optimizer(
+  initialize = function(params, lr = 0.01, ...) {
+    defaults <- list(lr = lr)
+    super$initialize(params, defaults)
+  },
+
+  step = function(closure = NULL) {
+    loss <- NULL
+    if (!is.null(closure)) loss <- closure()
+
+    with_no_grad({
+      for (group in self$param_groups) {
+        for (param in group$params) {
+          if (is.null(param$grad) || is_undefined_tensor(param$grad)) next
+          grad <- param$grad
+          lr <- group$lr
+
+          if (length(param$shape) == 1) {
+            param$mul_((-lr * grad)$exp())
+            param$div_(param$sum())
+          } else {
+            param$mul_((-lr * grad)$exp())
+            param$div_(param$sum(dim = 2, keepdim = TRUE))
+          }
+        }
+      }
+    })
+    loss
+  }
+)
+
 #' Projected gradient descent optimizer for simplex-constrained mixture weights
 #'
 #' Projects the gradient onto the tangent space of the simplex (removes the

@@ -8,6 +8,7 @@ box::use(
     torch_full,
     torch_tensor,
     torch_zeros_like,
+    torch_full_like,
     torch_where,
     torch_logsumexp
   ],
@@ -21,7 +22,7 @@ rdirichlet <- function(n, alpha) {
   k <- length(alpha)
   samples <- matrix(0, nrow = n, ncol = k)
   for (i in seq_len(k)) {
-    samples[, i] <- rgamma(n, shape = alpha[i], rate = 1)
+    samples[, i] <- stats::rgamma(n, shape = alpha[i], rate = 1)
   }
   samples / rowSums(samples)
 }
@@ -38,8 +39,8 @@ rdirichlet <- function(n, alpha) {
 #' @param ... Ignored (for compatible signatures).
 #' @export
 optim_frank_wolfe <- optimizer(
-  initialize = function(params, step = 2.0, alpha = 1.0, ...) {
-    defaults <- list(step = step, alpha = alpha)
+  initialize = function(params, step = 2.0, alpha = 1.0, pairwise = FALSE, ...) {
+    defaults <- list(step = step, alpha = alpha, pairwise = pairwise)
     super$initialize(params, defaults)
     private$iteration <- 0
   },
@@ -58,19 +59,39 @@ optim_frank_wolfe <- optimizer(
             next
           }
           grad <- param$grad
+          gamma <- (group$step / (private$iteration + group$step))^group$alpha
 
           if (length(param$shape) == 1) {
             best_idx <- grad$argmin()
-            s <- torch_zeros_like(param)
-            s[best_idx] <- 1.0
+            if (group$pairwise) {
+              grad_support <- torch_where(param > 0, grad, torch_full_like(grad, -Inf))
+              away_idx <- grad_support$argmax()
+              gamma <- min(gamma, param[away_idx]$item())
+              d <- torch_zeros_like(param)
+              d[best_idx] <- 1.0
+              d[away_idx] <- d[away_idx] - 1.0
+              param$add_(d, alpha = gamma)
+            } else {
+              s <- torch_zeros_like(param)
+              s[best_idx] <- 1.0
+              param$mul_(1 - gamma)$add_(s, alpha = gamma)
+            }
           } else {
             best_idx <- grad$argmin(dim = 2, keepdim = TRUE)
-            s <- torch_zeros_like(param)
-            s$scatter_(2, best_idx, 1.0)
+            if (group$pairwise) {
+              grad_support <- torch_where(param > 0, grad, torch_full_like(grad, -Inf))
+              away_idx <- grad_support$argmax(dim = 2, keepdim = TRUE)
+              gamma_eff <- param$gather(2, away_idx)$clamp(max = gamma)
+              d <- torch_zeros_like(param)
+              d$scatter_(2, best_idx, 1.0)
+              d$scatter_add_(2, away_idx, torch_full_like(param$gather(2, away_idx), -1.0))
+              param$add_(d * gamma_eff)
+            } else {
+              s <- torch_zeros_like(param)
+              s$scatter_(2, best_idx, 1.0)
+              param$mul_(1 - gamma)$add_(s, alpha = gamma)
+            }
           }
-
-          gamma <- (group$step / (private$iteration + group$step))^group$alpha
-          param$mul_(1 - gamma)$add_(s, alpha = gamma)
         }
       }
     })
@@ -136,32 +157,43 @@ optim_projected_gd <- optimizer(
 
 #' Minimise sum_theta max(0, E_theta[Q(X)/P_w(X)] - 1) over mixture weights via parallel restarts
 #'
-#' Runs `n_restarts` simultaneous gradient-descent optimisations from random
-#' Dirichlet initialisations. Pre-computes the count tensor, log-PMFs, and
-#' per-component log-denominators once, then updates all restarts in parallel
-#' each iteration. Tracks the best weights found across all iterations.
+#' Runs `n_restarts` simultaneous optimisations from random Dirichlet
+#' initialisations. Pre-computes the count tensor, log-PMFs, and per-component
+#' log-denominators once, then updates all restarts in parallel each iteration.
+#' Tracks the best weights found across all iterations.
 #'
 #' @param n Total number of trials per observation.
 #' @param log_theta Tensor of shape (m, T) — log DGP probabilities.
 #' @param log_q Tensor of shape (m,) — log numerator probabilities.
 #' @param log_ws Tensor of shape (m, C) — log mixture component probabilities.
-#' @param optim_fn Optimizer constructor, e.g. `optim_adam` or
-#'   [optim_frank_wolfe()]. Called as `optim_fn(params)`.
-#' @param sched_fn Function taking an optimizer and returning a step closure
-#'   `function(loss)`. Called every iteration after `optimizer$step()`. `NULL`
-#'   disables scheduling. Default: `NULL`.
+#' @param optim Function `optim(params)` that returns a step closure
+#'   `function(loss)`. The closure is called every iteration with the current
+#'   scalar loss; any value it returns invisibly is recorded in
+#'   `tracked_history`. Example (Adam + reduce-on-plateau, tracking lr):
+#'   ```r
+#'   optim = function(params) {
+#'     op   <- optim_adam(params, lr = 0.01)
+#'     sched <- lr_reduce_on_plateau(op, patience = 25, factor = 0.99)
+#'     function(loss) {
+#'       op$step()
+#'       sched$step(loss)
+#'       invisible(op$param_groups[[1]]$lr)
+#'     }
+#'   }
+#'   ```
 #' @param use_softmax If `TRUE`, optimise unconstrained logits and apply softmax
 #'   before each forward pass. Default: `FALSE`.
 #' @param n_restarts Number of parallel random restarts. Default: 10.
-#' @param batch_size Iterations per batch. Default: 1000.
-#' @param n_batches Maximum number of batches. Default: 100.
-#' @param track_freq Record loss and LR every this many iterations. Default: 100.
+#' @param iters Total number of update steps. Default: 100000.
+#' @param track_interval Record metrics every this many iterations. Default: 1000.
+#' @param report_interval Emit a progress line every this many iterations. Default: 10000.
 #' @return List with components:
 #'   - `weights`: tensor of shape (R, C), best weights per restart.
 #'   - `final_loss`: tensor of shape (R,), best loss achieved per restart.
-#'   - `loss_history`: tensor of shape (ceil(max_iter/track_freq), R).
-#'   - `lr_history`: numeric vector of length ceil(max_iter/track_freq), LR at
-#'     each tracked iteration.
+#'   - `loss_history`: tensor of shape (floor(iters/track_interval), R).
+#'   - `tracked_history`: numeric vector of length floor(iters/track_interval),
+#'     invisible return value of the `optim` closure at each tracked iteration
+#'     (e.g. current learning rate). `NA` when the closure returns nothing.
 #'   - `expectation_profile`: tensor of shape (R, T), E_theta[Q(X)/P_w(X)] per
 #'     restart at final weights.
 #' @export
@@ -170,13 +202,12 @@ optimize_mixture_weights <- function(
   log_theta,
   log_q,
   log_ws,
-  optim_fn,
-  sched_fn = NULL,
+  optim,
   use_softmax = TRUE,
   n_restarts = 10,
-  batch_size = 1000,
-  n_batches = 100,
-  track_freq = 100L,
+  iters = 100000L,
+  track_interval = 1000L,
+  report_interval = 10000L,
   emit_fn = message
 ) {
   X <- build_counts_tensor(n)
@@ -188,141 +219,116 @@ optimize_mixture_weights <- function(
   llr_num <- matmul_0_ninf(X, log_q$unsqueeze(2))$squeeze(2)
   log_comp_denoms <- matmul_0_ninf(X, log_ws)
 
-  best_losses <- torch_full(n_restarts, Inf, device = device, dtype = dtype)
-  best_weights <- torch_full(
-    c(n_restarts, C_),
-    0,
-    device = device,
-    dtype = dtype
-  )
+  # Forward pass: compute losses and intermediates for a batch of weight vectors.
+  # log_wts: (n_restarts, C) log mixture weights.
+  # Returns list(losses, exp_llr, max_exp_llr, above_mask, llr, llr_denom).
+  eval_weights <- function(log_wts) {
+    log_denoms_expanded <- add_ninf_any(
+      log_comp_denoms$unsqueeze(2)$expand(c(M_, n_restarts, C_)),
+      log_wts$unsqueeze(1)$expand(c(M_, n_restarts, C_))
+    )
+    llr_denom <- torch_logsumexp(log_denoms_expanded, dim = 3)
+    llr <- llr_num$unsqueeze(2)$expand(c(M_, n_restarts)) - llr_denom
+    log_pmf_llr <- add_ninf_any(
+      log_pmf$unsqueeze(3)$expand(c(M_, T_, n_restarts)),
+      llr$unsqueeze(2)$expand(c(M_, T_, n_restarts))
+    )
+    exp_llr <- torch_logsumexp(log_pmf_llr, dim = 1)$exp()
+    above_mask <- exp_llr > 1
+    list(
+      losses      = (exp_llr - 1)$clamp(min = 0)$sum(dim = 1L),
+      exp_llr     = exp_llr,
+      max_exp_llr = exp_llr$max(dim = 1L)[[1]],
+      above_mask  = above_mask,
+      llr         = llr,
+      llr_denom   = llr_denom
+    )
+  }
 
-  max_iter <- batch_size * n_batches
-  n_snapshots <- ceiling(max_iter / track_freq)
+  # Gradient of sum_theta max(0, E_theta[...] - 1) w.r.t. weights (and logits).
+  # weights: (n_restarts, C) simplex weights.
+  # above_mask, llr, llr_denom: intermediates from eval_weights.
+  # Returns list(grad_w, grad_u) where grad_u is only present when use_softmax.
+  compute_grad <- function(weights, above_mask, llr, llr_denom) {
+    active_pmf_sum <- log_pmf$exp()$matmul(above_mask$to(dtype = dtype))
+    log_grad_terms <- (active_pmf_sum$log()$unsqueeze(3) +
+      llr$unsqueeze(3) +
+      log_comp_denoms$unsqueeze(2) -
+      llr_denom$unsqueeze(3))
+    grad_w <- -log_grad_terms$logsumexp(dim = 1)$exp()
+    if (use_softmax) {
+      list(
+        grad_w = grad_w,
+        grad_u = weights * (grad_w - (grad_w * weights)$sum(dim = 2, keepdim = TRUE))
+      )
+    } else {
+      list(grad_w = grad_w)
+    }
+  }
+
+  best_losses <- torch_full(n_restarts, Inf, device = device, dtype = dtype)
+  best_weights <- torch_full(c(n_restarts, C_), 0, device = device, dtype = dtype)
+
+  n_snapshots <- iters %/% track_interval
   losses_history <- torch_full(
-    c(n_snapshots, n_restarts),
-    Inf,
-    device = device,
-    dtype = dtype
+    c(n_snapshots, n_restarts), Inf, device = device, dtype = dtype
   )
-  lr_history <- numeric(n_snapshots)
-  current_losses <- losses_history[1, ]
+  tracked_history <- rep(NA_real_, n_snapshots)
 
   if (use_softmax) {
     unconstrained_weights <- torch_randn(
-      c(n_restarts, C_),
-      device = device,
-      dtype = dtype,
-      requires_grad = FALSE
+      c(n_restarts, C_), device = device, dtype = dtype, requires_grad = FALSE
     )
-    optimizer <- optim_fn(list(unconstrained_weights))
+    step_fn <- optim(list(unconstrained_weights))
   } else {
     weights <- rdirichlet(n_restarts, rep(1, C_)) |>
       torch_tensor(device = device, dtype = dtype, requires_grad = FALSE)
-    optimizer <- optim_fn(list(weights))
+    step_fn <- optim(list(weights))
   }
 
-  sched_step <- if (!is.null(sched_fn)) sched_fn(optimizer) else NULL
+  for (iter in seq_len(iters)) {
+    if (use_softmax) weights <- nnf_softmax(unconstrained_weights, dim = 2)
+    fwd <- eval_weights(weights$log())
 
-  for (batch_idx in seq_len(n_batches)) {
-    for (i in seq_len(batch_size)) {
-      iter <- (batch_idx - 1) * batch_size + i
-      optimizer$zero_grad()
+    improved <- fwd$losses < best_losses
+    best_losses <- torch_where(improved, fwd$losses, best_losses)
+    best_weights[improved, ] <- weights[improved, ]
 
-      with_no_grad({
-        if (use_softmax) {
-          weights <- nnf_softmax(unconstrained_weights, dim = 2)
-          log_wts <- weights$log()
-        } else {
-          log_wts <- weights$log()
-        }
-
-        log_denoms_expanded <- add_ninf_any(
-          log_comp_denoms$unsqueeze(2)$expand(c(M_, n_restarts, C_)),
-          log_wts$unsqueeze(1)$expand(c(M_, n_restarts, C_))
-        )
-        llr_denom <- torch_logsumexp(log_denoms_expanded, dim = 3)
-        llr <- llr_num$unsqueeze(2)$expand(c(M_, n_restarts)) - llr_denom
-
-        log_pmf_llr <- add_ninf_any(
-          log_pmf$unsqueeze(3)$expand(c(M_, T_, n_restarts)),
-          llr$unsqueeze(2)$expand(c(M_, T_, n_restarts))
-        )
-        exp_llr <- torch_logsumexp(log_pmf_llr, dim = 1)$exp()
-
-        max_exp_llr <- exp_llr$max(dim = 1L)[[1]]
-        above_mask <- exp_llr > 1
-        current_losses <- (exp_llr - 1)$clamp(min = 0)$sum(dim = 1L)
-
-        improved <- current_losses < best_losses
-        best_losses <- torch_where(improved, current_losses, best_losses)
-        best_weights[improved, ] <- weights[improved, ]
-        if (iter %% track_freq == 0) {
-          idx <- iter / track_freq
-          losses_history[idx, ] <- current_losses
-          lr_history[idx] <- optimizer$param_groups[[1]]$lr
-        }
-
-        active_pmf_sum <- log_pmf$exp()$matmul(above_mask$to(dtype = dtype))
-        log_grad_terms <- (active_pmf_sum$log()$unsqueeze(3) +
-          llr$unsqueeze(3) +
-          log_comp_denoms$unsqueeze(2) -
-          llr_denom$unsqueeze(3))
-        grad_w <- -log_grad_terms$logsumexp(dim = 1)$exp()
-        if (use_softmax) {
-          grad_u <- weights *
-            (grad_w - (grad_w * weights)$sum(dim = 2, keepdim = TRUE))
-        }
-      })
-
-      if (use_softmax) {
-        unconstrained_weights$grad <- grad_u
-      } else {
-        weights$grad <- grad_w
-      }
-      optimizer$step()
-      if (!is.null(sched_step)) {
-        sched_step(current_losses$min()$item())
-      }
+    grads <- compute_grad(weights, fwd$above_mask, fwd$llr, fwd$llr_denom)
+    if (use_softmax) {
+      unconstrained_weights$grad <- grads$grad_u
+    } else {
+      weights$grad <- grads$grad_w
     }
 
-    emit_fn(sprintf(
-      "Batch %03d/%03d: best_so_far=%.6f best_now=%.6f best_exp_now=%.6f lr=%.2e norm=%.3f",
-      batch_idx,
-      n_batches,
-      best_losses$min()$item(),
-      current_losses$min()$item(),
-      max_exp_llr$min()$item(),
-      if (!is.null(sched_step)) optimizer$param_groups[[1]]$lr else NA_real_,
-      if (use_softmax) {
-        unconstrained_weights$norm(dim = 2L)$mean()$item()
-      } else {
-        NA_real_
-      }
-    ))
+    tracked <- step_fn(fwd$losses$min()$item())
+
+    if (iter %% track_interval == 0) {
+      idx <- iter %/% track_interval
+      losses_history[idx, ] <- fwd$losses
+      tracked_history[idx] <- if (is.null(tracked)) NA_real_ else as.numeric(tracked)
+    }
+
+    if (iter %% report_interval == 0) {
+      emit_fn(sprintf(
+        "Iter %06d/%06d: best_so_far=%.6f best_now=%.6f best_exp_now=%.6f tracked=%.4g norm=%.3f",
+        iter,
+        iters,
+        best_losses$min()$item(),
+        fwd$losses$min()$item(),
+        fwd$max_exp_llr$min()$item(),
+        if (!is.null(tracked)) as.numeric(tracked) else NA_real_,
+        if (use_softmax) unconstrained_weights$norm(dim = 2L)$mean()$item() else NA_real_
+      ))
+    }
   }
 
-  with_no_grad({
-    log_wts_final <- best_weights$log()
-    log_denoms_final <- add_ninf_any(
-      log_comp_denoms$unsqueeze(2)$expand(c(M_, n_restarts, C_)),
-      log_wts_final$unsqueeze(1)$expand(c(M_, n_restarts, C_))
-    )
-    llr_denom_final <- torch_logsumexp(log_denoms_final, dim = 3)
-    llr_final <- llr_num$unsqueeze(2)$expand(c(M_, n_restarts)) -
-      llr_denom_final
-    log_pmf_llr_final <- add_ninf_any(
-      log_pmf$unsqueeze(3)$expand(c(M_, T_, n_restarts)),
-      llr_final$unsqueeze(2)$expand(c(M_, T_, n_restarts))
-    )
-    expectation_profile <- torch_logsumexp(log_pmf_llr_final, dim = 1)$exp()$t()
-  })
-
   list(
-    weights = best_weights,
-    final_loss = best_losses,
-    loss_history = losses_history,
-    lr_history = lr_history,
-    expectation_profile = expectation_profile
+    weights          = best_weights,
+    final_loss       = best_losses,
+    loss_history     = losses_history,
+    tracked_history  = tracked_history,
+    expectation_profile = eval_weights(best_weights$log())$exp_llr$t()
   )
 }
 
@@ -339,15 +345,14 @@ optimize_mixture_weights <- function(
 #' @param ws R list of numeric vectors — mixture component grid, e.g. from
 #'   [make_simplex_grid()].
 #' @param n_restarts Number of parallel random restarts.
-#' @param optim_fn Optimizer constructor. Called as `optim_fn(params)`.
-#' @param sched_fn Function taking an optimizer and returning a step closure
-#'   `function(loss)`. See [optimize_mixture_weights()] for details. Default: `NULL`.
-#' @param batch_size Iterations per batch. Default: 1000.
-#' @param n_batches Maximum number of batches. Default: 250.
-#' @param track_freq Record loss and LR every this many iterations. Default: 100.
+#' @param optim Function `optim(params)` returning a step closure. See
+#'   [optimize_mixture_weights()] for the full interface and tracking example.
 #' @param use_softmax Optimise in unconstrained space via softmax. Default: `TRUE`.
-#' @return List with `weights`, `final_loss`, `loss_history`, `lr_history`, and
-#'   `expectation_profile`.
+#' @param iters Total number of update steps. Default: 100000.
+#' @param track_interval Record metrics every this many iterations. Default: 1000.
+#' @param report_interval Emit a progress line every this many iterations. Default: 10000.
+#' @return List with `weights`, `final_loss`, `loss_history`, `tracked_history`,
+#'   and `expectation_profile`.
 #' @export
 run_ripr <- function(
   n,
@@ -355,12 +360,11 @@ run_ripr <- function(
   q,
   ws,
   n_restarts,
-  optim_fn,
-  sched_fn = NULL,
-  batch_size = 1000,
-  n_batches = 250,
-  track_freq = 100L,
+  optim,
   use_softmax = TRUE,
+  iters = 100000L,
+  track_interval = 1000L,
+  report_interval = 10000L,
   emit_fn = message
 ) {
   to_log_tensor <- function(prob_list) {
@@ -375,13 +379,12 @@ run_ripr <- function(
     log_theta = to_log_tensor(thetas),
     log_q = torch_tensor(q, device = device, dtype = dtype)$log(),
     log_ws = to_log_tensor(ws),
-    optim_fn = optim_fn,
-    sched_fn = sched_fn,
+    optim = optim,
     use_softmax = use_softmax,
     n_restarts = n_restarts,
-    batch_size = batch_size,
-    n_batches = n_batches,
-    track_freq = track_freq,
+    iters = iters,
+    track_interval = track_interval,
+    report_interval = report_interval,
     emit_fn = emit_fn
   )
 }

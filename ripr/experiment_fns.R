@@ -86,44 +86,50 @@ run_ripr_target <- function(
   }
   emit("Device:", device_info)
 
-  optim_fn <- if (optim == "adam") {
-    optim_adam
-  } else {
-    stop("Unknown optimizer")
-  }
+  iters          <- 250000L
+  track_interval <- 1000L
+  report_interval <- 10000L
 
-  batch_size <- 1000
-  n_batches <- 250
-  iterations <- batch_size * n_batches
-
-  sched_fn <- if (sched == "null") {
-    NULL
-  } else if (sched == "step") {
-    function(optimizer) {
-      sched <- lr_step(optimizer, step_size = 1, gamma = 0.001^(1 / n_batches))
-      function(loss) sched$step()
+  optim_closure <- if (optim == "adam" && sched == "null") {
+    function(params) {
+      op <- optim_adam(params, lr = 0.01)
+      function(loss) {
+        op$step()
+        invisible(op$param_groups[[1]]$lr)
+      }
     }
-  } else if (sched == "cosine") {
-    function(optimizer) {
-      sched <- lr_cosine_annealing(
-        optimizer,
-        T_max = n_batches,
-        eta_min = 0.001
-      )
-      function(loss) sched$step()
+  } else if (optim == "adam" && sched == "step") {
+    function(params) {
+      op <- optim_adam(params, lr = 0.01)
+      sched_obj <- lr_step(op, step_size = 1, gamma = 0.001^(1 / iters))
+      function(loss) {
+        op$step()
+        sched_obj$step()
+        invisible(op$param_groups[[1]]$lr)
+      }
     }
-  } else if (sched == "plateau") {
-    function(optimizer) {
-      sched <- lr_reduce_on_plateau(
-        optimizer,
-        patience = 5,
-        factor = 0.5,
-        min_lr = 1e-4
-      )
-      function(loss) sched$step(loss)
+  } else if (optim == "adam" && sched == "cosine") {
+    function(params) {
+      op <- optim_adam(params, lr = 0.01)
+      sched_obj <- lr_cosine_annealing(op, T_max = iters, eta_min = 0.001)
+      function(loss) {
+        op$step()
+        sched_obj$step()
+        invisible(op$param_groups[[1]]$lr)
+      }
+    }
+  } else if (optim == "adam" && sched == "plateau") {
+    function(params) {
+      op <- optim_adam(params, lr = 0.01)
+      sched_obj <- lr_reduce_on_plateau(op, patience = 5, factor = 0.5, min_lr = 1e-4)
+      function(loss) {
+        op$step()
+        sched_obj$step(loss)
+        invisible(op$param_groups[[1]]$lr)
+      }
     }
   } else {
-    stop("Unknown scheduler type")
+    stop(sprintf("Unknown optimizer/scheduler combination: optim=%s sched=%s", optim, sched))
   }
 
   emit("Calling run_ripr...")
@@ -134,18 +140,19 @@ run_ripr_target <- function(
     q = q,
     ws = ws,
     n_restarts = n_restarts,
-    optim_fn = optim_fn,
-    sched_fn = sched_fn,
+    optim = optim_closure,
     use_softmax = TRUE,
-    batch_size = batch_size,
-    n_batches = n_batches
+    iters = iters,
+    track_interval = track_interval,
+    report_interval = report_interval
   )
   emit("run_ripr complete — converting results to arrays...")
 
   result <- list(
-    weights = as.array(res$weights),
-    final_loss = as.array(res$final_loss),
-    loss_history = as.array(res$loss_history),
+    weights         = as.array(res$weights),
+    final_loss      = as.array(res$final_loss),
+    loss_history    = as.array(res$loss_history),
+    tracked_history = res$tracked_history,
     expectation_profile = as.array(res$expectation_profile)
   )
   emit("Conversion complete")

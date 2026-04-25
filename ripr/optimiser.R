@@ -317,9 +317,13 @@ optim_projected_gd <- optimizer(
 #' @param iters Total number of update steps. Default: 100000.
 #' @param track_interval Record metrics every this many iterations. Default: 1000.
 #' @param report_interval Emit a progress line every this many iterations. Default: 10000.
-#' @param smooth_lambda Laplacian smoothness penalty weight. Penalises
-#'   `sum_i (w_{i+1} - w_i)^2` along the grid ordering, encouraging smooth
-#'   weight profiles. 0 disables (default).
+#' @param smooth_lambda Laplacian smoothness penalty weight. 0 disables (default).
+#' @param smooth_type Either `"l2"` (default) or `"log_l2"`. Controls whether
+#'   the penalty operates on raw weights (`"l2"`: penalises `sum_i (w_{i+1} - w_i)^2`)
+#'   or log-weights (`"log_l2"`: penalises `sum_i (log(w_{i+1}) - log(w_i))^2`).
+#'   `"log_l2"` is scale-invariant and better suited when weights span several
+#'   orders of magnitude, but its gradient diverges as weights approach zero —
+#'   use with `optim_mirror_descent` which keeps weights strictly positive.
 #' @return List with components:
 #'   - `weights`: tensor of shape (R, C), best weights per restart by surrogate
 #'     loss (sum of thresholded expectations). Useful for convergence diagnostics.
@@ -348,8 +352,10 @@ optimize_mixture_weights <- function(
   track_interval = 1000L,
   report_interval = 10000L,
   smooth_lambda = 0,
+  smooth_type = c("l2", "log_l2"),
   emit_fn = message
 ) {
+  smooth_type <- match.arg(smooth_type)
   X <- build_counts_tensor(n)
   M_ <- X$size(1)
   C_ <- log_ws$size(2)
@@ -398,15 +404,18 @@ optimize_mixture_weights <- function(
     grad_w <- -log_grad_terms$logsumexp(dim = 1)$exp()
 
     if (smooth_lambda > 0) {
-      # Path-graph Laplacian: penalises sum of squared first differences along
-      # the grid ordering. Gradient is 2*lambda * L*w where L is tridiagonal.
-      fd <- weights[, 2:C_] - weights[, 1:(C_ - 1L)]  # (R, C-1) first diffs
-      lap_w <- torch_cat(list(
+      # Path-graph Laplacian penalty. Gradient is 2*lambda * L*v where L is
+      # tridiagonal and v is weights ("l2") or log-weights ("log_l2").
+      # For "log_l2" the chain rule adds a 1/w factor: grad_w += (2*lambda/w) * L*log(w).
+      v <- if (smooth_type == "log_l2") weights$log() else weights
+      fd <- v[, 2:C_] - v[, 1:(C_ - 1L)]  # (R, C-1) first diffs of v
+      lap_v <- torch_cat(list(
         -fd[, 1:1],
         fd[, 1:(C_ - 2L)] - fd[, 2:(C_ - 1L)],
         fd[, (C_ - 1L):(C_ - 1L)]
       ), dim = 2)
-      grad_w <- grad_w + 2 * smooth_lambda * lap_w
+      pen_grad <- if (smooth_type == "log_l2") lap_v / weights else lap_v
+      grad_w <- grad_w + 2 * smooth_lambda * pen_grad
     }
 
     if (use_softmax) {
@@ -471,7 +480,8 @@ optimize_mixture_weights <- function(
 
       if (iter %% report_interval == 0) {
         reg_now <- if (smooth_lambda > 0) {
-          fd <- weights[, 2:C_] - weights[, 1:(C_ - 1L)]
+          v <- if (smooth_type == "log_l2") weights$log() else weights
+          fd <- v[, 2:C_] - v[, 1:(C_ - 1L)]
           (smooth_lambda * fd$pow(2)$sum(dim = 2L))$min()$item()
         } else 0
         emit_fn(sprintf(
@@ -522,8 +532,8 @@ optimize_mixture_weights <- function(
 #' @param iters Total number of update steps. Default: 100000.
 #' @param track_interval Record metrics every this many iterations. Default: 1000.
 #' @param report_interval Emit a progress line every this many iterations. Default: 10000.
-#' @param smooth_lambda Laplacian smoothness penalty weight. See
-#'   [optimize_mixture_weights()] for details. Default: 0.
+#' @param smooth_lambda Laplacian smoothness penalty weight. Default: 0.
+#' @param smooth_type `"l2"` or `"log_l2"`. See [optimize_mixture_weights()] for details.
 #' @return List with `weights`, `final_loss`, `weights_max_exp`, `final_max_exp`,
 #'   `loss_history`, `tracked_history`, `expectation_profile`, and
 #'   `expectation_profile_max_exp`. See [optimize_mixture_weights()] for details.
@@ -540,6 +550,7 @@ run_ripr <- function(
   track_interval = 1000L,
   report_interval = 10000L,
   smooth_lambda = 0,
+  smooth_type = c("l2", "log_l2"),
   emit_fn = message
 ) {
   to_log_tensor <- function(prob_list) {
@@ -561,6 +572,7 @@ run_ripr <- function(
     track_interval = track_interval,
     report_interval = report_interval,
     smooth_lambda = smooth_lambda,
+    smooth_type = smooth_type,
     emit_fn = emit_fn
   )
 }

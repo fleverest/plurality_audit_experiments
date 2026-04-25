@@ -18,8 +18,10 @@ run_ripr_target <- function(
   thetas,
   q,
   ws,
-  sched = "null",
-  optim = "adam"
+  optim = "adam",
+  iters = 250000L,
+  track_interval = 250L,
+  report_interval = 1000L
 ) {
   emit_path <- sprintf("ripr/emits/experiment_n%03d.emit", n)
   gpu_stats <- if (cuda_is_available()) {
@@ -86,50 +88,16 @@ run_ripr_target <- function(
   }
   emit("Device:", device_info)
 
-  iters          <- 250000L
-  track_interval <- 1000L
-  report_interval <- 10000L
-
-  optim_closure <- if (optim == "adam" && sched == "null") {
-    function(params) {
+  optim_closure <- if (optim == "adam") {
+    function(params, eval_fn = NULL) {
       op <- optim_adam(params, lr = 0.01)
       function(loss) {
         op$step()
-        invisible(op$param_groups[[1]]$lr)
-      }
-    }
-  } else if (optim == "adam" && sched == "step") {
-    function(params) {
-      op <- optim_adam(params, lr = 0.01)
-      sched_obj <- lr_step(op, step_size = 1, gamma = 0.001^(1 / iters))
-      function(loss) {
-        op$step()
-        sched_obj$step()
-        invisible(op$param_groups[[1]]$lr)
-      }
-    }
-  } else if (optim == "adam" && sched == "cosine") {
-    function(params) {
-      op <- optim_adam(params, lr = 0.01)
-      sched_obj <- lr_cosine_annealing(op, T_max = iters, eta_min = 0.001)
-      function(loss) {
-        op$step()
-        sched_obj$step()
-        invisible(op$param_groups[[1]]$lr)
-      }
-    }
-  } else if (optim == "adam" && sched == "plateau") {
-    function(params) {
-      op <- optim_adam(params, lr = 0.01)
-      sched_obj <- lr_reduce_on_plateau(op, patience = 5, factor = 0.5, min_lr = 1e-4)
-      function(loss) {
-        op$step()
-        sched_obj$step(loss)
         invisible(op$param_groups[[1]]$lr)
       }
     }
   } else {
-    stop(sprintf("Unknown optimizer/scheduler combination: optim=%s sched=%s", optim, sched))
+    stop(sprintf("Unknown optimizer: optim=%s", optim))
   }
 
   emit("Calling run_ripr...")

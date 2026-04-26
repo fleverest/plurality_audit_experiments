@@ -515,6 +515,7 @@ optimize_mixture_weights <- function(
   report_interval = 10000L,
   lin_smooth = 0,
   log_smooth = 0,
+  early_stopping_patience = NULL,
   emit_fn = message,
   monitor_fn = NULL
 ) {
@@ -543,8 +544,22 @@ optimize_mixture_weights <- function(
     )
     exp_llr <- torch_logsumexp(log_pmf_llr, dim = 1)$exp()
     above_mask <- exp_llr > 1
+    base_losses <- (exp_llr - 1)$clamp(min = 0)$sum(dim = 1L)
+    penalty <- torch_zeros_like(base_losses)
+    if (lin_smooth > 0 || log_smooth > 0) {
+      w <- log_wts$exp()
+      if (lin_smooth > 0) {
+        fd      <- w[, 2:C_] - w[, 1:(C_ - 1L)]
+        penalty <- penalty + lin_smooth * fd$pow(2)$sum(dim = 2L)
+      }
+      if (log_smooth > 0) {
+        fd      <- log_wts[, 2:C_] - log_wts[, 1:(C_ - 1L)]
+        penalty <- penalty + log_smooth * fd$pow(2)$sum(dim = 2L)
+      }
+    }
     list(
-      losses      = (exp_llr - 1)$clamp(min = 0)$sum(dim = 1L),
+      losses      = base_losses + penalty,
+      base_losses = base_losses,
       exp_llr     = exp_llr,
       max_exp_llr = exp_llr$max(dim = 1L)[[1]],
       above_mask  = above_mask,
@@ -604,9 +619,10 @@ optimize_mixture_weights <- function(
     }
   }
 
-  best_losses   <- torch_full(n_restarts, Inf, device = device, dtype = dtype)
-  best_weights  <- torch_full(c(n_restarts, C_), 0, device = device, dtype = dtype)
-  best_max_exp  <- torch_full(n_restarts, Inf, device = device, dtype = dtype)
+  best_losses        <- torch_full(n_restarts, Inf, device = device, dtype = dtype)
+  best_base_losses   <- torch_full(n_restarts, Inf, device = device, dtype = dtype)
+  best_weights       <- torch_full(c(n_restarts, C_), 0, device = device, dtype = dtype)
+  best_max_exp       <- torch_full(n_restarts, Inf, device = device, dtype = dtype)
   best_weights_max_exp <- torch_full(c(n_restarts, C_), 0, device = device, dtype = dtype)
 
   n_snapshots <- iters %/% track_interval
@@ -626,14 +642,33 @@ optimize_mixture_weights <- function(
     step_fn <- optim(list(weights), fwd_fn = eval_weights, bwd_fn = compute_grad)
   }
 
+  es_global_best     <- Inf
+  es_iters_no_improv <- 0L
+
   tryCatch(
     for (iter in seq_len(iters)) {
       if (use_softmax) weights <- nnf_softmax(unconstrained_weights, dim = 2)
       fwd <- eval_weights(weights$log())
 
       improved <- fwd$losses < best_losses
-      best_losses <- torch_where(improved, fwd$losses, best_losses)
+      best_losses      <- torch_where(improved, fwd$losses,      best_losses)
+      best_base_losses <- torch_where(improved, fwd$base_losses, best_base_losses)
       best_weights[improved, ] <- weights[improved, ]
+
+      if (!is.null(early_stopping_patience)) {
+        global_best <- best_losses$min()$item()
+        if (global_best < es_global_best) {
+          es_global_best     <- global_best
+          es_iters_no_improv <- 0L
+        } else {
+          es_iters_no_improv <- es_iters_no_improv + 1L
+          if (es_iters_no_improv >= early_stopping_patience) {
+            emit_fn(sprintf("Early stopping at iter %d (no improvement for %d iters).",
+                            iter, early_stopping_patience))
+            break
+          }
+        }
+      }
 
       improved_max <- fwd$max_exp_llr < best_max_exp
       best_max_exp <- torch_where(improved_max, fwd$max_exp_llr, best_max_exp)
@@ -657,8 +692,10 @@ optimize_mixture_weights <- function(
           monitor_fn(list(
             iter                 = iter,
             cur_loss             = as.numeric(fwd$losses),
+            cur_loss_unreg       = as.numeric(fwd$base_losses),
             cur_max_exp          = as.numeric(fwd$max_exp_llr),
             best_loss            = as.numeric(best_losses),
+            best_loss_unreg      = as.numeric(best_base_losses),
             best_max_exp         = as.numeric(best_max_exp),
             cur_weights          = as.array(weights),
             best_weights         = as.array(best_weights),
@@ -670,16 +707,7 @@ optimize_mixture_weights <- function(
       }
 
       if (iter %% report_interval == 0) {
-        reg_now <- 0
-        if (lin_smooth > 0) {
-          fd <- weights[, 2:C_] - weights[, 1:(C_ - 1L)]
-          reg_now <- (lin_smooth * fd$pow(2)$sum(dim = 2L))$min()$item()
-        }
-        if (log_smooth > 0) {
-          v <- weights$log()
-          fd <- v[, 2:C_] - v[, 1:(C_ - 1L)]
-          reg_now <- reg_now + (log_smooth * fd$pow(2)$sum(dim = 2L))$min()$item()
-        }
+        reg_now <- (fwd$losses - fwd$base_losses)$min()$item()
         emit_fn(sprintf(
           "Iter %06d/%06d: best_loss=%.6f best_max_exp=%.6f cur_loss=%.6f cur_reg=%.6f cur_max_exp=%.6f tracked=%.4g norm=%.3f",
           iter,
@@ -747,6 +775,7 @@ run_ripr <- function(
   report_interval = 10000L,
   lin_smooth = 0,
   log_smooth = 0,
+  early_stopping_patience = NULL,
   emit_fn = message,
   monitor_fn = NULL
 ) {
@@ -770,6 +799,7 @@ run_ripr <- function(
     report_interval = report_interval,
     lin_smooth = lin_smooth,
     log_smooth = log_smooth,
+    early_stopping_patience = early_stopping_patience,
     emit_fn = emit_fn,
     monitor_fn = monitor_fn
   )

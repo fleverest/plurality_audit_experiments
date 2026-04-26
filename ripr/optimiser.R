@@ -457,6 +457,9 @@ lbfgs <- function(lr = 1, max_iter = 20, history_size = 100) {
 #' @param iters Total number of update steps. Default: 100000.
 #' @param track_interval Record metrics every this many iterations. Default: 1000.
 #' @param report_interval Emit a progress line every this many iterations. Default: 10000.
+#' @param init_weights Optional numeric matrix or tensor of shape `(n_restarts, C)`
+#'   to use as the starting point instead of random initialisation. Pass the
+#'   `weights` or `weights_max_exp` tensor from a previous result directly.
 #' @param lin_smooth Path-Laplacian smoothness penalty on raw weights. Default: 0.
 #' @param log_smooth Path-Laplacian smoothness penalty on log-weights. Default: 0.
 #' @return List with components:
@@ -513,6 +516,7 @@ optimize_mixture_weights <- function(
   iters = 100000L,
   track_interval = 1000L,
   report_interval = 10000L,
+  init_weights = NULL,
   lin_smooth = 0,
   log_smooth = 0,
   early_stopping_patience = NULL,
@@ -631,14 +635,40 @@ optimize_mixture_weights <- function(
   )
   tracked_history <- rep(NA_real_, n_snapshots)
 
+  as_weight_tensor <- function(w) {
+    if (inherits(w, "torch_tensor")) {
+      w$to(device = device, dtype = dtype)$detach()
+    } else {
+      torch_tensor(w, device = device, dtype = dtype)
+    }
+  }
+
+  if (!is.null(init_weights)) {
+    iw <- as_weight_tensor(init_weights)
+    if (!identical(as.integer(iw$shape), as.integer(c(n_restarts, C_)))) {
+      stop(sprintf(
+        "init_weights must have shape (%d, %d); got (%s)",
+        n_restarts, C_, paste(iw$shape, collapse = ", ")
+      ))
+    }
+  }
+
   if (use_softmax) {
-    unconstrained_weights <- torch_randn(
-      c(n_restarts, C_), device = device, dtype = dtype, requires_grad = FALSE
-    )
+    unconstrained_weights <- if (!is.null(init_weights)) {
+      as_weight_tensor(init_weights)$log()
+    } else {
+      torch_randn(c(n_restarts, C_), device = device, dtype = dtype)
+    }
+    unconstrained_weights$requires_grad_(FALSE)
     step_fn <- optim(list(unconstrained_weights), fwd_fn = eval_weights, bwd_fn = compute_grad)
   } else {
-    weights <- rdirichlet(n_restarts, rep(1, C_)) |>
-      torch_tensor(device = device, dtype = dtype, requires_grad = FALSE)
+    weights <- if (!is.null(init_weights)) {
+      as_weight_tensor(init_weights)
+    } else {
+      rdirichlet(n_restarts, rep(1, C_)) |>
+        torch_tensor(device = device, dtype = dtype)
+    }
+    weights$requires_grad_(FALSE)
     step_fn <- optim(list(weights), fwd_fn = eval_weights, bwd_fn = compute_grad)
   }
 
@@ -756,6 +786,10 @@ optimize_mixture_weights <- function(
 #' @param iters Total number of update steps. Default: 100000.
 #' @param track_interval Record metrics every this many iterations. Default: 1000.
 #' @param report_interval Emit a progress line every this many iterations. Default: 10000.
+#' @param init_weights Optional numeric matrix or tensor of shape
+#'   `(n_restarts, length(ws))` to use as the starting point instead of random
+#'   initialisation. Accepts the `weights` or `weights_max_exp` tensor from a
+#'   previous [run_ripr()] result directly.
 #' @param lin_smooth Laplacian smoothness penalty for the weights. Default: 0 (no smoothing).
 #' @param log_smooth Laplacian smoothness penalty for the log-weights. Default: 0 (no smoothing).
 #' @return List with `weights`, `final_loss`, `weights_max_exp`, `final_max_exp`,
@@ -773,6 +807,7 @@ run_ripr <- function(
   iters = 100000L,
   track_interval = 1000L,
   report_interval = 10000L,
+  init_weights = NULL,
   lin_smooth = 0,
   log_smooth = 0,
   early_stopping_patience = NULL,
@@ -797,6 +832,7 @@ run_ripr <- function(
     iters = iters,
     track_interval = track_interval,
     report_interval = report_interval,
+    init_weights = init_weights,
     lin_smooth = lin_smooth,
     log_smooth = log_smooth,
     early_stopping_patience = early_stopping_patience,

@@ -353,7 +353,8 @@ optimize_mixture_weights <- function(
   report_interval = 10000L,
   smooth_lambda = 0,
   smooth_type = c("l2", "log_l2"),
-  emit_fn = message
+  emit_fn = message,
+  monitor_fn = NULL
 ) {
   smooth_type <- match.arg(smooth_type)
   X <- build_counts_tensor(n)
@@ -476,6 +477,21 @@ optimize_mixture_weights <- function(
         idx <- iter %/% track_interval
         losses_history[idx, ] <- fwd$losses
         tracked_history[idx] <- if (is.null(tracked)) NA_real_ else as.numeric(tracked)
+
+        if (!is.null(monitor_fn)) {
+          monitor_fn(list(
+            iter                 = iter,
+            cur_loss             = as.numeric(fwd$losses),
+            cur_max_exp          = as.numeric(fwd$max_exp_llr),
+            best_loss            = as.numeric(best_losses),
+            best_max_exp         = as.numeric(best_max_exp),
+            cur_weights          = as.array(weights),
+            best_weights         = as.array(best_weights),
+            best_weights_max_exp = as.array(best_weights_max_exp),
+            exp_llr              = t(as.array(fwd$exp_llr)),
+            tracked              = if (is.null(tracked)) NA_real_ else as.numeric(tracked)
+          ))
+        }
       }
 
       if (iter %% report_interval == 0) {
@@ -551,7 +567,8 @@ run_ripr <- function(
   report_interval = 10000L,
   smooth_lambda = 0,
   smooth_type = c("l2", "log_l2"),
-  emit_fn = message
+  emit_fn = message,
+  monitor_fn = NULL
 ) {
   to_log_tensor <- function(prob_list) {
     do.call(what = rbind, args = prob_list) |>
@@ -573,6 +590,7 @@ run_ripr <- function(
     report_interval = report_interval,
     smooth_lambda = smooth_lambda,
     smooth_type = smooth_type,
-    emit_fn = emit_fn
+    emit_fn = emit_fn,
+    monitor_fn = monitor_fn
   )
 }

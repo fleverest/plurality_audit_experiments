@@ -8,7 +8,8 @@ box::use(
     torch_manual_seed
   ],
   ripr / grids[make_simplex_grid],
-  ripr / optimiser[run_ripr, optim_frank_wolfe, optim_mirror_descent]
+  ripr / optimiser[run_ripr, optim_frank_wolfe, optim_mirror_descent],
+  ripr / monitor[db_monitor]
 )
 
 library(tidyverse)
@@ -20,12 +21,17 @@ ws <- make_simplex_grid(2001)
 n <- 5L
 n_restarts <- 20L
 iters <- 5000000L
-track_interval <- 100L
+track_interval <- 1000L
 report_interval <- 1000L
+
+
+
 
 cat("\n--- sched = NULL ---\n")
 set.seed(20260422)
 torch_manual_seed(sample.int(.Machine$integer.max, 1L))
+con <- DBI::dbConnect(RSQLite::SQLite(), "log/res_null.sqlite")
+DBI::dbExecute(con, "PRAGMA journal_mode=WAL")
 res_null <- run_ripr(
   n = n,
   thetas = thetas,
@@ -40,8 +46,10 @@ res_null <- run_ripr(
   track_interval = track_interval,
   report_interval = report_interval,
   smooth_lambda = 0.00001,
-  smooth_type = "log_l2"
+  smooth_type = "log_l2",
+  monitor_fn = db_monitor(con)
 )
+DBI::dbDisconnect(con)
 
 res_null$weights_max_exp |>
   as.array() |>

@@ -1,6 +1,8 @@
 box::use(
   torch[
     optimizer,
+    optim_adam,
+    optim_lbfgs,
     with_no_grad,
     is_undefined_tensor,
     nnf_softmax,
@@ -275,6 +277,163 @@ optim_projected_gd <- optimizer(
   private = list(momentum_buffer = NULL)
 )
 
+# ---------------------------------------------------------------------------
+# Closure factory factories for the `optim` argument of run_ripr
+# ---------------------------------------------------------------------------
+
+#' Adam closure factory
+#'
+#' Returns a closure factory for [run_ripr()] that optimises with Adam.
+#' Always tracks the current learning rate via `tracked_history`.
+#'
+#' @param lr Initial learning rate. Default: 0.01.
+#' @param scheduler Optional `function(optimizer)` that wraps the Adam
+#'   optimizer in a torch `lr_scheduler`. The scheduler's `$step()` is called
+#'   after each parameter update. For schedulers that require a loss value
+#'   (e.g. `lr_reduce_on_plateau`), pass `loss = TRUE`; the current loss tensor
+#'   is forwarded automatically.
+#' @param loss If `TRUE`, passes the current loss to `scheduler$step()`.
+#'   Default: `FALSE`.
+#' @return A closure factory.
+#' @examples
+#' \dontrun{
+#' run_ripr(..., optim = adam(lr = 0.01))
+#' run_ripr(..., optim = adam(
+#'   lr = 0.01,
+#'   scheduler = function(op) lr_reduce_on_plateau(op, patience = 25, factor = 0.99),
+#'   loss = TRUE
+#' ))
+#' }
+#' @export
+adam <- function(lr = 0.01, scheduler = NULL, loss = FALSE) {
+  function(params, fwd_fn = NULL, bwd_fn = NULL) {
+    op    <- optim_adam(params, lr = lr)
+    sched <- if (!is.null(scheduler)) scheduler(op) else NULL
+    function(current_loss) {
+      op$step()
+      if (!is.null(sched)) {
+        if (loss) sched$step(current_loss) else sched$step()
+      }
+      invisible(op$param_groups[[1]]$lr)
+    }
+  }
+}
+
+#' Frank-Wolfe closure factory (scheduled step size)
+#'
+#' Returns a closure factory for [run_ripr()] using the Frank-Wolfe algorithm
+#' with the step size schedule `gamma_t = (step / (t + step))^alpha`.
+#'
+#' @param step Step-size constant. Default: 2.
+#' @param alpha Decay exponent. Default: 1.
+#' @param pairwise Use pairwise FW variant. Default: `FALSE`.
+#' @return A closure factory.
+#' @examples
+#' \dontrun{
+#' run_ripr(..., optim = fw(), use_softmax = FALSE)
+#' run_ripr(..., optim = fw(step = 50, pairwise = TRUE), use_softmax = FALSE)
+#' }
+#' @export
+fw <- function(step = 2, alpha = 1, pairwise = FALSE) {
+  function(params, fwd_fn = NULL, bwd_fn = NULL) {
+    op <- optim_frank_wolfe(params, step = step, alpha = alpha, pairwise = pairwise)
+    function(loss) op$step()
+  }
+}
+
+#' Frank-Wolfe closure factory (exact line search)
+#'
+#' Returns a closure factory for [run_ripr()] using Frank-Wolfe with golden
+#' section search for the exact step size. Requires `fwd_fn` provided by the
+#' optimisation loop.
+#'
+#' @param pairwise Use pairwise FW variant. Default: `FALSE`.
+#' @param ls_tol GSS convergence tolerance. Default: 1e-6.
+#' @return A closure factory.
+#' @examples
+#' \dontrun{
+#' run_ripr(..., optim = fw_ls(), use_softmax = FALSE)
+#' run_ripr(..., optim = fw_ls(pairwise = TRUE), use_softmax = FALSE)
+#' }
+#' @export
+fw_ls <- function(pairwise = FALSE, ls_tol = 1e-6) {
+  function(params, fwd_fn = NULL, bwd_fn = NULL) {
+    op <- optim_frank_wolfe(params, pairwise = pairwise, line_search = TRUE, ls_tol = ls_tol)
+    function(loss) op$step(eval_fn = fwd_fn)
+  }
+}
+
+#' Mirror descent closure factory
+#'
+#' Returns a closure factory for [run_ripr()] using the multiplicative-weights
+#' (mirror descent) update. Always tracks the current learning rate via
+#' `tracked_history`.
+#'
+#' @param lr Initial learning rate. Default: 0.01.
+#' @param scheduler Optional `function(optimizer)` wrapping the optimizer in a
+#'   torch `lr_scheduler`. See [adam()] for details.
+#' @param loss If `TRUE`, passes the current loss to `scheduler$step()`.
+#'   Default: `FALSE`.
+#' @return A closure factory.
+#' @examples
+#' \dontrun{
+#' run_ripr(..., optim = mirror(lr = 0.001), use_softmax = FALSE)
+#' run_ripr(..., optim = mirror(
+#'   lr = 0.01,
+#'   scheduler = function(op) lr_cosine_annealing(op, T_max = 100000L)
+#' ), use_softmax = FALSE)
+#' }
+#' @export
+mirror <- function(lr = 0.01, scheduler = NULL, loss = FALSE) {
+  function(params, fwd_fn = NULL, bwd_fn = NULL) {
+    op    <- optim_mirror_descent(params, lr = lr)
+    sched <- if (!is.null(scheduler)) scheduler(op) else NULL
+    function(current_loss) {
+      op$step()
+      if (!is.null(sched)) {
+        if (loss) sched$step(current_loss) else sched$step()
+      }
+      invisible(op$param_groups[[1]]$lr)
+    }
+  }
+}
+
+#' L-BFGS closure factory
+#'
+#' Returns a closure factory for [run_ripr()] using L-BFGS. The step closure
+#' passes a full forward+backward closure to L-BFGS, which re-evaluates it
+#' during its internal line search. Requires `use_softmax = TRUE` — L-BFGS
+#' operates in unconstrained logit space and applies softmax internally.
+#' All restarts are optimised jointly (L-BFGS minimises the sum of losses
+#' across restarts and approximates a single shared Hessian).
+#'
+#' @param lr Step size. Default: 1.
+#' @param max_iter Maximum L-BFGS iterations per step. Default: 20.
+#' @param history_size Number of curvature pairs to retain. Default: 100.
+#' @return A closure factory.
+#' @examples
+#' \dontrun{
+#' run_ripr(..., optim = lbfgs(), use_softmax = TRUE)
+#' }
+#' @export
+lbfgs <- function(lr = 1, max_iter = 20, history_size = 100) {
+  function(params, fwd_fn = NULL, bwd_fn = NULL) {
+    op <- optim_lbfgs(params, lr = lr, max_iter = max_iter, history_size = history_size)
+    function(loss) {
+      op$step(closure = function() {
+        op$zero_grad()
+        w   <- nnf_softmax(params[[1]], dim = 2)
+        fwd <- fwd_fn(w$log())
+        g   <- bwd_fn(w, fwd$above_mask, fwd$llr, fwd$llr_denom)
+        params[[1]]$grad <- g$grad_u
+        fwd$losses$sum()
+      })
+    }
+  }
+}
+
+# ---------------------------------------------------------------------------
+
 #' Minimise sum_theta max(0, E_theta[Q(X)/P_w(X)] - 1) over mixture weights via parallel restarts
 #'
 #' Runs `n_restarts` simultaneous optimisations from random Dirichlet
@@ -286,39 +445,20 @@ optim_projected_gd <- optimizer(
 #' @param log_theta Tensor of shape (m, T) — log DGP probabilities.
 #' @param log_q Tensor of shape (m,) — log numerator probabilities.
 #' @param log_ws Tensor of shape (m, C) — log mixture component probabilities.
-#' @param optim Function `optim(params, eval_fn = NULL)` that returns a step
-#'   closure `function(loss)`. The closure is called every iteration with the
-#'   current scalar loss; any value it returns invisibly is recorded in
-#'   `tracked_history`. `eval_fn` is a function `eval_fn(log_wts)` that
-#'   evaluates the objective for a batch of log-weight tensors — pass it to
-#'   optimizers that need it (e.g. Frank-Wolfe with exact line search).
-#'   Example (Adam + reduce-on-plateau, tracking lr):
-#'   ```r
-#'   optim = function(params, eval_fn = NULL) {
-#'     op    <- optim_adam(params, lr = 0.01)
-#'     sched <- lr_reduce_on_plateau(op, patience = 25, factor = 0.99)
-#'     function(loss) {
-#'       op$step()
-#'       sched$step(loss)
-#'       invisible(op$param_groups[[1]]$lr)
-#'     }
-#'   }
-#'   ```
-#'   Example (Frank-Wolfe with exact line search):
-#'   ```r
-#'   optim = function(params, eval_fn = NULL) {
-#'     op <- optim_frank_wolfe(params, line_search = TRUE)
-#'     function(loss) op$step(eval_fn = eval_fn)
-#'   }
-#'   ```
+#' @param optim Closure factory: `function(params, fwd_fn = NULL, bwd_fn = NULL)`
+#'   returning a step closure `function(loss)`. The step closure is called every
+#'   iteration with the current min loss tensor; any value it returns invisibly
+#'   is recorded in `tracked_history`. Use the prebuilt factories [adam()],
+#'   [fw()], [fw_ls()], [mirror()], [lbfgs()], or define your own — see section
+#'   *Custom optimisers* below.
 #' @param use_softmax If `TRUE`, optimise unconstrained logits and apply softmax
 #'   before each forward pass. Default: `FALSE`.
 #' @param n_restarts Number of parallel random restarts. Default: 10.
 #' @param iters Total number of update steps. Default: 100000.
 #' @param track_interval Record metrics every this many iterations. Default: 1000.
 #' @param report_interval Emit a progress line every this many iterations. Default: 10000.
-#' @param lin_smooth Laplacian smoothness penalty weight for linear weights. Default: 0.
-#' @param log_smooth 
+#' @param lin_smooth Path-Laplacian smoothness penalty on raw weights. Default: 0.
+#' @param log_smooth Path-Laplacian smoothness penalty on log-weights. Default: 0.
 #' @return List with components:
 #'   - `weights`: tensor of shape (R, C), best weights per restart by surrogate
 #'     loss (sum of thresholded expectations). Useful for convergence diagnostics.
@@ -334,6 +474,33 @@ optim_projected_gd <- optimizer(
 #'     restart at `weights`.
 #'   - `expectation_profile_max_exp`: tensor of shape (R, T),
 #'     E_theta[Q(X)/P_w(X)] per restart at `weights_max_exp`.
+#' @section Custom optimisers:
+#'   A custom factory has the signature
+#'   `function(params, fwd_fn = NULL, bwd_fn = NULL)` and returns a step
+#'   closure `function(loss)`.
+#'
+#'   `fwd_fn(log_wts)` is the forward pass: given log mixture weights of shape
+#'   (R, C) it returns the full evaluation list (`losses`, `exp_llr`,
+#'   `above_mask`, `llr`, `llr_denom`). Most first-order methods can ignore it.
+#'
+#'   `bwd_fn(weights, above_mask, llr, llr_denom)` computes gradients and
+#'   returns `list(grad_w, grad_u)`. It is needed only when the optimiser must
+#'   re-evaluate loss and gradient on demand — specifically when passing a
+#'   closure to L-BFGS, which calls back into the forward+backward pass during
+#'   its internal line search.
+#'
+#'   Example — Adam with reduce-on-plateau, tracking the learning rate:
+#'   ```r
+#'   function(params, fwd_fn = NULL, bwd_fn = NULL) {
+#'     op    <- optim_adam(params, lr = 0.01)
+#'     sched <- lr_reduce_on_plateau(op, patience = 25, factor = 0.99)
+#'     function(loss) {
+#'       op$step()
+#'       sched$step(loss)
+#'       invisible(op$param_groups[[1]]$lr)
+#'     }
+#'   }
+#'   ```
 #' @export
 optimize_mixture_weights <- function(
   n,
@@ -452,11 +619,11 @@ optimize_mixture_weights <- function(
     unconstrained_weights <- torch_randn(
       c(n_restarts, C_), device = device, dtype = dtype, requires_grad = FALSE
     )
-    step_fn <- optim(list(unconstrained_weights), eval_fn = eval_weights)
+    step_fn <- optim(list(unconstrained_weights), fwd_fn = eval_weights, bwd_fn = compute_grad)
   } else {
     weights <- rdirichlet(n_restarts, rep(1, C_)) |>
       torch_tensor(device = device, dtype = dtype, requires_grad = FALSE)
-    step_fn <- optim(list(weights), eval_fn = eval_weights)
+    step_fn <- optim(list(weights), fwd_fn = eval_weights, bwd_fn = compute_grad)
   }
 
   tryCatch(

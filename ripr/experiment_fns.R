@@ -3,13 +3,9 @@ box::use(
     cuda_is_available,
     cuda_device_count,
     cuda_empty_cache,
-    torch_manual_seed,
-    optim_adam,
-    lr_cosine_annealing,
-    lr_reduce_on_plateau,
-    lr_step
+    torch_manual_seed
   ],
-  ripr / optimiser[run_ripr]
+  ripr / optimiser[run_ripr, adam]
 )
 
 run_ripr_target <- function(
@@ -18,7 +14,7 @@ run_ripr_target <- function(
   thetas,
   q,
   ws,
-  optim = "adam",
+  optim = adam(lr = 0.01),
   iters = 250000L,
   track_interval = 250L,
   report_interval = 1000L
@@ -88,18 +84,6 @@ run_ripr_target <- function(
   }
   emit("Device:", device_info)
 
-  optim_closure <- if (optim == "adam") {
-    function(params, eval_fn = NULL) {
-      op <- optim_adam(params, lr = 0.01)
-      function(loss) {
-        op$step()
-        invisible(op$param_groups[[1]]$lr)
-      }
-    }
-  } else {
-    stop(sprintf("Unknown optimizer: optim=%s", optim))
-  }
-
   emit("Calling run_ripr...")
   res <- run_ripr(
     emit_fn = emit,
@@ -108,7 +92,7 @@ run_ripr_target <- function(
     q = q,
     ws = ws,
     n_restarts = n_restarts,
-    optim = optim_closure,
+    optim = optim,
     use_softmax = TRUE,
     iters = iters,
     track_interval = track_interval,

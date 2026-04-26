@@ -91,7 +91,8 @@ log_iteration <- function(con, state, experiment_id) {
       list(experiment_id, as.integer(iter), as.numeric(Sys.time()), min(state$best_loss))
     )
 
-    scalar_metrics <- c("cur_loss", "cur_max_exp", "best_loss", "best_max_exp")
+    scalar_metrics <- c("cur_loss", "cur_loss_unreg", "cur_max_exp",
+                        "best_loss", "best_loss_unreg", "best_max_exp")
     metrics_rows <- do.call(rbind, lapply(scalar_metrics, function(m) {
       data.frame(
         experiment_id = experiment_id,

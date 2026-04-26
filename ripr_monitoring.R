@@ -1,3 +1,4 @@
+box::purge_cache()
 box::use(
   ripr / monitor[init_db, db_monitor],
   ripr / dashboard[run_dashboard]

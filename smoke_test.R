@@ -12,10 +12,9 @@ box::use(
 library(tidyverse)
 
 # SQLite connections for logging
-con <- DBI::dbConnect(RSQLite::SQLite(), "log/optim.sqlite")
+con <- DBI::dbConnect(RSQLite::SQLite(), "log/optim_log.sqlite")
 DBI::dbExecute(con, "PRAGMA journal_mode=WAL")
 
-# Define the problem parameters
 q <- c(7 / 16, 5 / 16, 4 / 16)
 thetas <- make_simplex_grid(4001)
 ws <- make_simplex_grid(2001)
@@ -41,7 +40,8 @@ res_null <- run_ripr(
   track_interval = track_interval,
   report_interval = report_interval,
   lin_smooth = 1e2,
-  log_smooth = 1e-5
+  log_smooth = 1e-5,
+  monitor_fn = db_monitor(con)
 )
 DBI::dbDisconnect(con)
 

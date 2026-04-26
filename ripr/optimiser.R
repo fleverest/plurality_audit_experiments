@@ -317,13 +317,8 @@ optim_projected_gd <- optimizer(
 #' @param iters Total number of update steps. Default: 100000.
 #' @param track_interval Record metrics every this many iterations. Default: 1000.
 #' @param report_interval Emit a progress line every this many iterations. Default: 10000.
-#' @param smooth_lambda Laplacian smoothness penalty weight. 0 disables (default).
-#' @param smooth_type Either `"l2"` (default) or `"log_l2"`. Controls whether
-#'   the penalty operates on raw weights (`"l2"`: penalises `sum_i (w_{i+1} - w_i)^2`)
-#'   or log-weights (`"log_l2"`: penalises `sum_i (log(w_{i+1}) - log(w_i))^2`).
-#'   `"log_l2"` is scale-invariant and better suited when weights span several
-#'   orders of magnitude, but its gradient diverges as weights approach zero —
-#'   use with `optim_mirror_descent` which keeps weights strictly positive.
+#' @param lin_smooth Laplacian smoothness penalty weight for linear weights. Default: 0.
+#' @param log_smooth 
 #' @return List with components:
 #'   - `weights`: tensor of shape (R, C), best weights per restart by surrogate
 #'     loss (sum of thresholded expectations). Useful for convergence diagnostics.
@@ -351,12 +346,11 @@ optimize_mixture_weights <- function(
   iters = 100000L,
   track_interval = 1000L,
   report_interval = 10000L,
-  smooth_lambda = 0,
-  smooth_type = c("l2", "log_l2"),
+  lin_smooth = 0,
+  log_smooth = 0,
   emit_fn = message,
   monitor_fn = NULL
 ) {
-  smooth_type <- match.arg(smooth_type)
   X <- build_counts_tensor(n)
   M_ <- X$size(1)
   C_ <- log_ws$size(2)
@@ -404,19 +398,33 @@ optimize_mixture_weights <- function(
       llr_denom$unsqueeze(3))
     grad_w <- -log_grad_terms$logsumexp(dim = 1)$exp()
 
-    if (smooth_lambda > 0) {
-      # Path-graph Laplacian penalty. Gradient is 2*lambda * L*v where L is
-      # tridiagonal and v is weights ("l2") or log-weights ("log_l2").
-      # For "log_l2" the chain rule adds a 1/w factor: grad_w += (2*lambda/w) * L*log(w).
-      v <- if (smooth_type == "log_l2") weights$log() else weights
-      fd <- v[, 2:C_] - v[, 1:(C_ - 1L)]  # (R, C-1) first diffs of v
-      lap_v <- torch_cat(list(
-        -fd[, 1:1],
-        fd[, 1:(C_ - 2L)] - fd[, 2:(C_ - 1L)],
-        fd[, (C_ - 1L):(C_ - 1L)]
-      ), dim = 2)
-      pen_grad <- if (smooth_type == "log_l2") lap_v / weights else lap_v
-      grad_w <- grad_w + 2 * smooth_lambda * pen_grad
+    if (lin_smooth > 0 || log_smooth > 0) {
+      # Path-graph Laplacian penalty. `lin_smooth` adds an L2 penalty on
+      # adjacent weight differences; `log_smooth` adds the same penalty on
+      # log-weights. Both penalties encourage smoothness in the weight
+      # distribution, which can help with convergence if the RIPr is indeed
+      # smooth.
+      # `lin_smooth` has a stronger effect on the high-density modes, while
+      # `log_smooth` encourages smoothness in the tails.
+      if (lin_smooth > 0) {
+        fd <- weights[, 2:C_] - weights[, 1:(C_ - 1L)]
+        lap_v <- torch_cat(list(
+          -fd[, 1:1],
+          fd[, 1:(C_ - 2L)] - fd[, 2:(C_ - 1L)],
+          fd[, (C_ - 1L):(C_ - 1L)]
+        ), dim = 2)
+        grad_w <- grad_w + 2 * lin_smooth * lap_v
+      }
+      if (log_smooth > 0) {
+        log_weights <- weights$log()
+        fd <- log_weights[, 2:C_] - log_weights[, 1:(C_ - 1L)]
+        lap_v <- torch_cat(list(
+          -fd[, 1:1],
+          fd[, 1:(C_ - 2L)] - fd[, 2:(C_ - 1L)],
+          fd[, (C_ - 1L):(C_ - 1L)]
+        ), dim = 2)
+        grad_w <- grad_w + 2 * log_smooth * lap_v / weights
+      }
     }
 
     if (use_softmax) {
@@ -495,11 +503,16 @@ optimize_mixture_weights <- function(
       }
 
       if (iter %% report_interval == 0) {
-        reg_now <- if (smooth_lambda > 0) {
-          v <- if (smooth_type == "log_l2") weights$log() else weights
+        reg_now <- 0
+        if (lin_smooth > 0) {
+          fd <- weights[, 2:C_] - weights[, 1:(C_ - 1L)]
+          reg_now <- (lin_smooth * fd$pow(2)$sum(dim = 2L))$min()$item()
+        }
+        if (log_smooth > 0) {
+          v <- weights$log()
           fd <- v[, 2:C_] - v[, 1:(C_ - 1L)]
-          (smooth_lambda * fd$pow(2)$sum(dim = 2L))$min()$item()
-        } else 0
+          reg_now <- reg_now + (log_smooth * fd$pow(2)$sum(dim = 2L))$min()$item()
+        }
         emit_fn(sprintf(
           "Iter %06d/%06d: best_loss=%.6f best_max_exp=%.6f cur_loss=%.6f cur_reg=%.6f cur_max_exp=%.6f tracked=%.4g norm=%.3f",
           iter,
@@ -548,8 +561,8 @@ optimize_mixture_weights <- function(
 #' @param iters Total number of update steps. Default: 100000.
 #' @param track_interval Record metrics every this many iterations. Default: 1000.
 #' @param report_interval Emit a progress line every this many iterations. Default: 10000.
-#' @param smooth_lambda Laplacian smoothness penalty weight. Default: 0.
-#' @param smooth_type `"l2"` or `"log_l2"`. See [optimize_mixture_weights()] for details.
+#' @param lin_smooth Laplacian smoothness penalty for the weights. Default: 0 (no smoothing).
+#' @param log_smooth Laplacian smoothness penalty for the log-weights. Default: 0 (no smoothing).
 #' @return List with `weights`, `final_loss`, `weights_max_exp`, `final_max_exp`,
 #'   `loss_history`, `tracked_history`, `expectation_profile`, and
 #'   `expectation_profile_max_exp`. See [optimize_mixture_weights()] for details.
@@ -565,8 +578,8 @@ run_ripr <- function(
   iters = 100000L,
   track_interval = 1000L,
   report_interval = 10000L,
-  smooth_lambda = 0,
-  smooth_type = c("l2", "log_l2"),
+  lin_smooth = 0,
+  log_smooth = 0,
   emit_fn = message,
   monitor_fn = NULL
 ) {
@@ -588,8 +601,8 @@ run_ripr <- function(
     iters = iters,
     track_interval = track_interval,
     report_interval = report_interval,
-    smooth_lambda = smooth_lambda,
-    smooth_type = smooth_type,
+    lin_smooth = lin_smooth,
+    log_smooth = log_smooth,
     emit_fn = emit_fn,
     monitor_fn = monitor_fn
   )

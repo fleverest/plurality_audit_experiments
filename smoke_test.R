@@ -20,7 +20,7 @@ ws <- make_simplex_grid(2001)
 
 n <- 5L
 n_restarts <- 20L
-iters <- 5000000L
+iters <- 100000L
 track_interval <- 1000L
 report_interval <- 1000L
 
@@ -30,7 +30,7 @@ report_interval <- 1000L
 cat("\n--- sched = NULL ---\n")
 set.seed(20260422)
 torch_manual_seed(sample.int(.Machine$integer.max, 1L))
-con <- DBI::dbConnect(RSQLite::SQLite(), "log/res_null.sqlite")
+con <- DBI::dbConnect(RSQLite::SQLite(), "log/optim_log_linsmooth.sqlite")
 DBI::dbExecute(con, "PRAGMA journal_mode=WAL")
 res_null <- run_ripr(
   n = n,
@@ -45,8 +45,8 @@ res_null <- run_ripr(
   iters = iters,
   track_interval = track_interval,
   report_interval = report_interval,
-  smooth_lambda = 0.00001,
-  smooth_type = "log_l2",
+  lin_smooth = 1e2,
+  log_smooth = 1e-5,
   monitor_fn = db_monitor(con)
 )
 DBI::dbDisconnect(con)
@@ -64,7 +64,7 @@ res_null$weights_max_exp |>
   ) |>
   ggplot(aes(x = w_ind, y = prob, group = restart)) +
   geom_line() +
-  scale_y_log10() +
+  # scale_y_log10() +
   labs(title = "Best weights", y = "max_theta(E) - 1 (log scale)")
 
 

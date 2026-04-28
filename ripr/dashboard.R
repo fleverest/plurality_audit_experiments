@@ -157,7 +157,7 @@ make_server <- function(db_path) {
       unused    <- setdiff(all_keys, used_keys)
 
       rows <- lapply(filters, function(f) {
-        vals <- c("(all)" = "",
+        vals <- c("(all)" = "", "(set)" = "__set__",
                   sort(unique(d$params$value[d$params$key == f$key])))
         tags$div(class = "d-flex gap-1 align-items-center mb-1",
           tags$div(class = "fw-semibold small", style = "min-width:6rem", f$key),
@@ -188,8 +188,10 @@ make_server <- function(db_path) {
       for (f in filters) {
         val <- input[[paste0("fv_", f$id)]]
         if (is.null(val) || val == "") next
-        matched <- d$params$experiment_id[d$params$key == f$key &
-                                          d$params$value == val]
+        matched <- if (val == "__set__")
+          unique(d$params$experiment_id[d$params$key == f$key])
+        else
+          d$params$experiment_id[d$params$key == f$key & d$params$value == val]
         ids <- ids[ids %in% matched]
       }
       d$exp[d$exp$id %in% ids, ]
@@ -204,7 +206,7 @@ make_server <- function(db_path) {
       # Only show params not already fixed by an active (non-"all") filter.
       fixed_keys  <- sapply(filters, function(f) {
         val <- input[[paste0("fv_", f$id)]]
-        if (!is.null(val) && val != "") f$key else NA_character_
+        if (!is.null(val) && val != "" && val != "__set__") f$key else NA_character_
       })
       show_keys   <- setdiff(all_keys, fixed_keys[!is.na(fixed_keys)])
 

@@ -462,6 +462,14 @@ lbfgs <- function(lr = 1, max_iter = 20, history_size = 100) {
 #'   `weights` or `weights_max_exp` tensor from a previous result directly.
 #' @param lin_smooth Path-Laplacian smoothness penalty on raw weights. Default: 0.
 #' @param log_smooth Path-Laplacian smoothness penalty on log-weights. Default: 0.
+#' @param early_stopping_patience Stop early if no meaningful improvement is seen
+#'   for this many consecutive iterations. Checked at each `track_interval`
+#'   checkpoint, so the effective resolution is `track_interval` iterations.
+#'   `NULL` disables early stopping. Default: `NULL`.
+#' @param early_stopping_tol Relative improvement threshold for early stopping.
+#'   An interval counts as "no improvement" unless the global best loss drops by
+#'   more than `early_stopping_tol * prev_best`. Ignored when
+#'   `early_stopping_patience` is `NULL`. Default: `1e-4`.
 #' @return List with components:
 #'   - `weights`: tensor of shape (R, C), best weights per restart by surrogate
 #'     loss (sum of thresholded expectations). Useful for convergence diagnostics.
@@ -520,6 +528,7 @@ optimize_mixture_weights <- function(
   lin_smooth = 0,
   log_smooth = 0,
   early_stopping_patience = NULL,
+  early_stopping_tol = 1e-4,
   emit_fn = message,
   monitor_fn = NULL
 ) {
@@ -685,21 +694,6 @@ optimize_mixture_weights <- function(
       best_base_losses <- torch_where(improved, fwd$base_losses, best_base_losses)
       best_weights[improved, ] <- weights[improved, ]
 
-      if (!is.null(early_stopping_patience)) {
-        global_best <- best_losses$min()$item()
-        if (global_best < es_global_best) {
-          es_global_best     <- global_best
-          es_iters_no_improv <- 0L
-        } else {
-          es_iters_no_improv <- es_iters_no_improv + 1L
-          if (es_iters_no_improv >= early_stopping_patience) {
-            emit_fn(sprintf("Early stopping at iter %d (no improvement for %d iters).",
-                            iter, early_stopping_patience))
-            break
-          }
-        }
-      }
-
       improved_max <- fwd$max_exp_llr < best_max_exp
       best_max_exp <- torch_where(improved_max, fwd$max_exp_llr, best_max_exp)
       best_weights_max_exp[improved_max, ] <- weights[improved_max, ]
@@ -714,9 +708,26 @@ optimize_mixture_weights <- function(
       tracked <- step_fn(fwd$losses$min())
 
       if (iter %% track_interval == 0) {
-        idx <- iter %/% track_interval
+                idx <- iter %/% track_interval
         losses_history[idx, ] <- fwd$losses
         tracked_history[idx] <- if (is.null(tracked)) NA_real_ else as.numeric(tracked)
+
+        if (!is.null(early_stopping_patience)) {
+          global_best <- best_losses$min()$item()
+          if (global_best < es_global_best * (1 - early_stopping_tol)) {
+            es_global_best     <- global_best
+            es_iters_no_improv <- 0L
+          } else {
+            es_iters_no_improv <- es_iters_no_improv + track_interval
+            if (es_iters_no_improv >= early_stopping_patience) {
+              emit_fn(sprintf(
+                "Early stopping at iter %d (no improvement >= %.2g for %d iters).",
+                iter, early_stopping_tol, early_stopping_patience
+              ))
+              break
+            }
+          }
+        }
 
         if (!is.null(monitor_fn)) {
           monitor_fn(list(
@@ -792,6 +803,10 @@ optimize_mixture_weights <- function(
 #'   previous [run_ripr()] result directly.
 #' @param lin_smooth Laplacian smoothness penalty for the weights. Default: 0 (no smoothing).
 #' @param log_smooth Laplacian smoothness penalty for the log-weights. Default: 0 (no smoothing).
+#' @param early_stopping_patience Stop early if no meaningful improvement is seen
+#'   for this many consecutive iterations. `NULL` disables early stopping. Default: `NULL`.
+#' @param early_stopping_tol Relative improvement threshold for early stopping.
+#'   See [optimize_mixture_weights()]. Default: `1e-4`.
 #' @return List with `weights`, `final_loss`, `weights_max_exp`, `final_max_exp`,
 #'   `loss_history`, `tracked_history`, `expectation_profile`, and
 #'   `expectation_profile_max_exp`. See [optimize_mixture_weights()] for details.
@@ -811,6 +826,7 @@ run_ripr <- function(
   lin_smooth = 0,
   log_smooth = 0,
   early_stopping_patience = NULL,
+  early_stopping_tol = 1e-4,
   emit_fn = message,
   monitor_fn = NULL
 ) {
@@ -836,6 +852,7 @@ run_ripr <- function(
     lin_smooth = lin_smooth,
     log_smooth = log_smooth,
     early_stopping_patience = early_stopping_patience,
+    early_stopping_tol = early_stopping_tol,
     emit_fn = emit_fn,
     monitor_fn = monitor_fn
   )

@@ -16,75 +16,40 @@ con <- DBI::dbConnect(RSQLite::SQLite(), "log/optim_log.sqlite")
 DBI::dbExecute(con, "PRAGMA journal_mode=WAL")
 
 q <- c(7 / 16, 5 / 16, 4 / 16)
-thetas <- make_simplex_grid(4001)
-ws <- make_simplex_grid(2001)
+thetas <- make_simplex_grid(2001)
+ws <- make_simplex_grid(1001)
 
 n <- 5L
 n_restarts <- 10L
 iters <- 1000000L
 track_interval <- 1000L
 report_interval <- 1000L
-early_stopping_patience <- 10000L
+early_stopping_patience <- 20000L
+early_stopping_tol <- 1e-4
 
 
-adam_grid <- expand_grid(
-  learning_rate = c(0.1, 0.01),
-  scheduler = c("none", "reduce_on_plateau"),
-  rop_patience = c(1L, 10L),
-  rop_factor = c(0.9, 0.99),
-  lin_smooth = c(1e-1, 1e0, 1e1, 1e1, 1e2),
-  log_smooth = c(1e-6, 1e-5, 1e-4, 1e-3, 1e-2)
-)
+lr <- 1e-2
+optim <- adam(lr = lr, scheduler = \(opt) lr_reduce_on_plateau(opt, patience = 5000L, factor = 0.5, min_lr = 1e-4), loss = TRUE, restore_best = FALSE)
 
-for (i in seq_len(nrow(adam_grid))) {
-  params <- adam_grid[i, ]
-
-  param_str <- paste0(names(params), "=", params, collapse = ", ")
-  cat("Running with params:", param_str, "\n")
-
-  # Set up scheduler based on parameters
-  if (params$scheduler == "reduce_on_plateau") {
-    scheduler <- function(opt) lr_reduce_on_plateau(
-      opt,
-      patience = params$rop_patience,
-      factor = params$rop_factor,
-      min_lr = 1e-4
-    )
-  } else {
-    # Only run once, repeats are caught by monitor.
-    scheduler <- NULL
-  }
-
-  # Construct optimiser with scheduler and learning rate
-  optim <- adam(
-    lr = params$learning_rate,
-    scheduler = scheduler,
-    loss = TRUE
-  )
-
-  # Database monitor for logging optimization progress
-  tryCatch(
-    mon <- db_monitor(
-      con,
-      optim = "adam",
-      learning_rate = params$learning_rate,
-      scheduler = params$scheduler,
-      lin_smooth = params$lin_smooth,
-      log_smooth = params$log_smooth
-    ),
-    error = function(e) {
-      cat("Error setting up monitor:", e$message, "\n")
-      mon <<- FALSE
-    }
-  )
-  if (isFALSE(mon)) {
-    cat("Skipping optimization due to monitor setup failure.\n")
+ns <- 1:100
+set.seed(20260502)
+torch_manual_seed(sample.int(.Machine$integer.max, 1L))
+for (n in ns) {
+  if (file.exists(paste0("results/optim_n_", n, ".rds"))) {
+    cat("Results for n =", n, "already exist. Skipping.\n")
     next
   }
-
-  set.seed(20260422)
-  torch_manual_seed(sample.int(.Machine$integer.max, 1L))
-  res_null <- run_ripr(
+  cat("Running optimization for n =", n, "\n")
+  # Database monitor for logging optimization progress
+  mon <- db_monitor(
+    con,
+    optim = "adam",
+    learning_rate = lr,
+    scheduler = "rop",
+    n = n,
+    overwrite = TRUE
+  )
+  result <- run_ripr(
     n = n,
     thetas = thetas,
     q = q,
@@ -94,11 +59,14 @@ for (i in seq_len(nrow(adam_grid))) {
     iters = iters,
     track_interval = track_interval,
     report_interval = report_interval,
-    lin_smooth = params$lin_smooth,
-    log_smooth = params$log_smooth,
+    lin_smooth = 0,
+    log_smooth = 0,
     monitor_fn = mon,
-    early_stopping_patience = early_stopping_patience
+    early_stopping_patience = early_stopping_patience,
+    early_stopping_tol = early_stopping_tol
   )
+  saveRDS(result, file = paste0("results/optim_n_", n, ".rds"))
+  gc()
 }
 DBI::dbDisconnect(con)
 
@@ -120,6 +88,7 @@ res_lbfgs <- run_ripr(
   lin_smooth = 1e0,
   log_smooth = 1e-4,
   early_stopping_patience = early_stopping_patience,
+  early_stopping_tol = early_stopping_tol,
   monitor_fn = db_monitor(con, optim = "lbfgs", learning_rate = 0.1, lin_smooth = 1e0, log_smooth = 1e-4, overwrite = TRUE)
 )
 
@@ -186,7 +155,7 @@ for (i in seq_len(nrow(resolution_grid))) {
   ws <- make_simplex_grid(params$ws)
 
   # Run optimisation with settings that seem to have performed well in previous tests
-  optim <- adam(lr = 1e-2, scheduler = \(opt) lr_reduce_on_plateau(opt, patience = 5000L, factor = 0.5, min_lr = 1e-5), loss = TRUE)
+  optim <- adam(lr = 1e-4, scheduler = \(opt) lr_reduce_on_plateau(opt, patience = 1000L, factor = 0.5, min_lr = 1e-6), loss = TRUE)
 
   set.seed(20260422)
   torch_manual_seed(sample.int(.Machine$integer.max, 1L))
@@ -202,7 +171,32 @@ for (i in seq_len(nrow(resolution_grid))) {
     report_interval = report_interval,
     lin_smooth = 0,
     log_smooth = 0,
-    monitor_fn = db_monitor(con, optim = "adam + rop", learning_rate = 1e-2, lin_smooth = 0, log_smooth = 0, ws = params$ws, thetas = params$thetas, overwrite = TRUE),
-    early_stopping_patience = early_stopping_patience
+    monitor_fn = db_monitor(con, optim = "adam + rop", learning_rate = 1e-4, lin_smooth = 0, log_smooth = 0, ws = params$ws, thetas = params$thetas, overwrite = TRUE),
+    early_stopping_patience = early_stopping_patience,
+    early_stopping_tol = early_stopping_tol
   )
 }
+
+# Test ws=257, thetas=2049 with mirror descent
+
+ws <- make_simplex_grid(257)
+thetas <- make_simplex_grid(2049)
+optim <- mirror(lr = 1e-2)
+set.seed(20260422)
+torch_manual_seed(sample.int(.Machine$integer.max, 1L))
+res_mirror <- run_ripr(
+  n = n,
+  thetas = thetas,
+  q = q,
+  ws = ws,
+  n_restarts = n_restarts,
+  optim = optim,
+  iters = iters,
+  track_interval = track_interval,
+  report_interval = report_interval,
+  lin_smooth = 0,
+  log_smooth = 0,
+  early_stopping_patience = early_stopping_patience,
+  early_stopping_tol = early_stopping_tol,
+  monitor_fn = db_monitor(con, optim = "mirror descent", learning_rate = 1e-2, lin_smooth = 0, log_smooth = 0, ws = 257, thetas = 2049, overwrite = TRUE)
+)

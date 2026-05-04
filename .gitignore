@@ -6,6 +6,7 @@ data*
 *.zst
 *.npz
 *.Rds
+results/*
 # Plots
 *.pdf
 *.png

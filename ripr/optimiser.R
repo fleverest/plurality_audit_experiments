@@ -8,15 +8,18 @@ box::use(
     nnf_softmax,
     torch_randn,
     torch_full,
+    torch_empty,
     torch_tensor,
     torch_zeros_like,
     torch_full_like,
     torch_where,
     torch_logsumexp,
-    torch_cat
+    torch_amax,
+    torch_cat,
+    torch_isneginf
   ],
   ripr / torch_settings[device, dtype],
-  ripr / tensor_ops[matmul_0_ninf, add_ninf_any],
+  ripr / tensor_ops[matmul_0_ninf, add_ninf_any, add_ninf_any_, logsumexp_inplace_],
   ripr / multinomial[build_counts_tensor, mnom_logpmf]
 )
 
@@ -294,6 +297,10 @@ optim_projected_gd <- optimizer(
 #'   is forwarded automatically.
 #' @param loss If `TRUE`, passes the current loss to `scheduler$step()`.
 #'   Default: `FALSE`.
+#' @param restore_best If `TRUE` and a scheduler is provided, restores the
+#'   parameters to the best-seen weights whenever the scheduler reduces the
+#'   learning rate. Useful with `lr_reduce_on_plateau` to resume from the best
+#'   checkpoint after each reduction. Default: `FALSE`.
 #' @return A closure factory.
 #' @examples
 #' \dontrun{
@@ -301,18 +308,32 @@ optim_projected_gd <- optimizer(
 #' run_ripr(..., optim = adam(
 #'   lr = 0.01,
 #'   scheduler = function(op) lr_reduce_on_plateau(op, patience = 25, factor = 0.99),
-#'   loss = TRUE
+#'   loss = TRUE,
+#'   restore_best = TRUE
 #' ))
 #' }
 #' @export
-adam <- function(lr = 0.01, scheduler = NULL, loss = FALSE) {
+adam <- function(lr = 0.01, scheduler = NULL, loss = FALSE, restore_best = FALSE) {
   function(params, fwd_fn = NULL, bwd_fn = NULL) {
     op    <- optim_adam(params, lr = lr)
     sched <- if (!is.null(scheduler)) scheduler(op) else NULL
+    best_loss    <- Inf
+    best_weights <- NULL
     function(current_loss) {
+      if (restore_best && !is.null(sched)) {
+        cl <- as.numeric(current_loss)
+        if (cl < best_loss) {
+          best_loss    <<- cl
+          best_weights <<- params[[1]]$detach()$clone()
+        }
+      }
+      prev_lr <- op$param_groups[[1]]$lr
       op$step()
       if (!is.null(sched)) {
         if (loss) sched$step(current_loss) else sched$step()
+        if (restore_best && op$param_groups[[1]]$lr < prev_lr) {
+          with_no_grad(params[[1]]$copy_(best_weights))
+        }
       }
       invisible(op$param_groups[[1]]$lr)
     }
@@ -541,21 +562,22 @@ optimize_mixture_weights <- function(
   llr_num <- matmul_0_ninf(X, log_q$unsqueeze(2))$squeeze(2)
   log_comp_denoms <- matmul_0_ninf(X, log_ws)
 
+  buf_MRC <- torch_empty(c(M_, n_restarts, C_), device = device, dtype = dtype)
+  buf_MTR <- torch_empty(c(M_, T_, n_restarts), device = device, dtype = dtype)
+  buf_MT  <- torch_empty(c(M_, T_), device = device, dtype = dtype)
+
+  logpmf_ninf <- torch_isneginf(log_pmf)
+  logcd_ninf  <- torch_isneginf(log_comp_denoms)
+
   # Forward pass: compute losses and intermediates for a batch of weight vectors.
   # log_wts: (n_restarts, C) log mixture weights.
   # Returns list(losses, exp_llr, max_exp_llr, above_mask, llr, llr_denom).
   eval_weights <- function(log_wts) {
-    log_denoms_expanded <- add_ninf_any(
-      log_comp_denoms$unsqueeze(2)$expand(c(M_, n_restarts, C_)),
-      log_wts$unsqueeze(1)$expand(c(M_, n_restarts, C_))
-    )
-    llr_denom <- torch_logsumexp(log_denoms_expanded, dim = 3)
-    llr <- llr_num$unsqueeze(2)$expand(c(M_, n_restarts)) - llr_denom
-    log_pmf_llr <- add_ninf_any(
-      log_pmf$unsqueeze(3)$expand(c(M_, T_, n_restarts)),
-      llr$unsqueeze(2)$expand(c(M_, T_, n_restarts))
-    )
-    exp_llr <- torch_logsumexp(log_pmf_llr, dim = 1)$exp()
+    add_ninf_any_(buf_MRC, log_comp_denoms$unsqueeze(2L), log_wts$unsqueeze(1L), logcd_ninf$unsqueeze(2L))
+    llr_denom <- logsumexp_inplace_(buf_MRC, dim = 3L)
+    llr <- llr_num$unsqueeze(2L) - llr_denom
+    add_ninf_any_(buf_MTR, log_pmf$unsqueeze(3L), llr$unsqueeze(2L), logpmf_ninf$unsqueeze(3L))
+    exp_llr <- logsumexp_inplace_(buf_MTR, dim = 1L)$exp()
     above_mask <- exp_llr > 1
     base_losses <- (exp_llr - 1)$clamp(min = 0)$sum(dim = 1L)
     penalty <- torch_zeros_like(base_losses)
@@ -574,7 +596,7 @@ optimize_mixture_weights <- function(
       losses      = base_losses + penalty,
       base_losses = base_losses,
       exp_llr     = exp_llr,
-      max_exp_llr = exp_llr$max(dim = 1L)[[1]],
+      max_exp_llr = torch_amax(exp_llr, dim = 1L),
       above_mask  = above_mask,
       llr         = llr,
       llr_denom   = llr_denom
@@ -586,12 +608,13 @@ optimize_mixture_weights <- function(
   # above_mask, llr, llr_denom: intermediates from eval_weights.
   # Returns list(grad_w, grad_u) where grad_u is only present when use_softmax.
   compute_grad <- function(weights, above_mask, llr, llr_denom) {
-    active_pmf_sum <- log_pmf$exp()$matmul(above_mask$to(dtype = dtype))
-    log_grad_terms <- (active_pmf_sum$log()$unsqueeze(3) +
-      llr$unsqueeze(3) +
-      log_comp_denoms$unsqueeze(2) -
-      llr_denom$unsqueeze(3))
-    grad_w <- -log_grad_terms$logsumexp(dim = 1)$exp()
+    buf_MT$copy_(log_pmf)$exp_()
+    active_pmf_sum <- buf_MT$matmul(above_mask$to(dtype = dtype))
+    buf_MRC$copy_(active_pmf_sum$log()$unsqueeze(3L))
+    buf_MRC$add_(llr$unsqueeze(3L))
+    buf_MRC$add_(log_comp_denoms$unsqueeze(2L))
+    buf_MRC$sub_(llr_denom$unsqueeze(3L))
+    grad_w <- -logsumexp_inplace_(buf_MRC, dim = 1L)$exp()
 
     if (lin_smooth > 0 || log_smooth > 0) {
       # Path-graph Laplacian penalty. `lin_smooth` adds an L2 penalty on
@@ -767,14 +790,14 @@ optimize_mixture_weights <- function(
   )
 
   list(
-    weights                  = best_weights,
-    final_loss               = best_losses,
-    weights_max_exp          = best_weights_max_exp,
-    final_max_exp            = best_max_exp,
-    loss_history             = losses_history,
-    tracked_history          = tracked_history,
-    expectation_profile      = eval_weights(best_weights$log())$exp_llr$t(),
-    expectation_profile_max_exp = eval_weights(best_weights_max_exp$log())$exp_llr$t()
+    weights                  = as.array(best_weights),
+    final_loss               = as.array(best_losses),
+    weights_max_exp          = as.array(best_weights_max_exp),
+    final_max_exp            = as.array(best_max_exp),
+    loss_history             = as.array(losses_history),
+    tracked_history          = as.array(tracked_history),
+    expectation_profile      = as.array(eval_weights(best_weights$log())$exp_llr$t()),
+    expectation_profile_max_exp = as.array(eval_weights(best_weights_max_exp$log())$exp_llr$t())
   )
 }
 

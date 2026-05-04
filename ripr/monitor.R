@@ -136,6 +136,7 @@ log_iteration <- function(con, state, experiment_id) {
         )
       }))
     }))
+    dbExecute(con, "DELETE FROM profiles WHERE experiment_id = ?", list(experiment_id))
     dbAppendTable(con, "profiles", profile_rows)
   })
 }

@@ -1,5 +1,5 @@
 box::use(
-  torch[torch_isneginf, torch_where, torch_zeros_like, torch_matmul],
+  torch[torch_isneginf, torch_where, torch_zeros_like, torch_matmul, torch_amax],
   ripr / torch_settings[dtype]
 )
 
@@ -41,4 +41,40 @@ add_ninf_any <- function(A, B) {
   result <- A + B
   result$masked_fill_(A_ninf, -Inf)
   result
+}
+
+#' In-place element-wise addition treating -Inf + x as -Inf
+#'
+#' Fills `out` with `A + B`, masking positions where `A` is -Inf back to -Inf.
+#' `A` and `B` may be smaller tensors that broadcast into `out`; the mask is
+#' computed from `A` before expansion, avoiding a large intermediate bool tensor.
+#'
+#' @param out Pre-allocated output tensor. Modified in-place.
+#' @param A First tensor (unexpanded). -Inf positions are preserved.
+#' @param B Second tensor (unexpanded).
+#' @return `out`, invisibly.
+#' @export
+add_ninf_any_ <- function(out, A, B, A_ninf = NULL) {
+  out$copy_(A)
+  out$add_(B)
+  out$masked_fill_(if (is.null(A_ninf)) torch_isneginf(A) else A_ninf, -Inf)
+  invisible(out)
+}
+
+#' In-place numerically-stable logsumexp along `dim`
+#'
+#' Computes `logsumexp(buf, dim)` without allocating a full-sized temporary.
+#' `buf` is modified in-place (contains shifted exp values after the call) and
+#' must not be read again until overwritten. Where all inputs along `dim` are
+#' -Inf the result is -Inf.
+#'
+#' @param buf Tensor to reduce. Modified in-place.
+#' @param dim Integer dimension to reduce over.
+#' @return Tensor of the reduced logsumexp values (one fewer dimension than `buf`).
+#' @export
+logsumexp_inplace_ <- function(buf, dim) {
+  mx <- torch_amax(buf, dim = dim, keepdim = TRUE)
+  safe_mx <- torch_where(torch_isneginf(mx), torch_zeros_like(mx), mx)
+  buf$sub_(safe_mx)$exp_()
+  buf$sum(dim = dim)$log()$add_(safe_mx$squeeze(dim))
 }

@@ -2,22 +2,27 @@ box::use(
   shiny[
     shinyApp, runApp,
     reactive, reactiveVal, reactivePoll, observe, observeEvent, isolate,
-    radioButtons, selectInput, updateSelectInput, actionButton,
+    radioButtons, checkboxInput, selectInput, updateSelectInput, actionButton,
     renderUI, uiOutput,
     renderText, verbatimTextOutput,
-    tagList, tags
+    tagList, tags, req, conditionalPanel, HTML
   ],
-  plotly[plot_ly, add_trace, layout, plotlyOutput, renderPlotly,
-         plotlyProxy, plotlyProxyInvoke],
-  bslib[page_sidebar, sidebar, layout_columns, card, card_header],
+  plotly[plot_ly, add_trace, layout, subplot, plotlyOutput, renderPlotly,
+         event_data, event_register],
+  bslib[page_sidebar, sidebar, layout_columns, card, card_header,
+        navset_card_tab, nav_panel],
   DBI[dbConnect, dbDisconnect, dbExecute, dbGetQuery],
   RSQLite[SQLite]
 )
 
-METRICS    <- c("best_loss", "best_max_exp")
-COLORS     <- c(best_loss = "#2c7bb6", best_max_exp = "#d7191c")
-LABELS     <- c(best_loss = "best_loss", best_max_exp = "best_max_exp - 1")
-TRANSFORMS <- list(best_loss = identity, best_max_exp = function(y) y - 1)
+METRICS    <- c("best_loss", "cur_loss", "best_max_exp", "cur_max_exp")
+COLORS     <- c(best_loss = "#2c7bb6", cur_loss = "#2c7bb6",
+                best_max_exp = "#d7191c", cur_max_exp = "#d7191c")
+LABELS     <- c(best_loss = "best_loss", cur_loss = "cur_loss",
+                best_max_exp = "best_max_exp - 1", cur_max_exp = "cur_max_exp - 1")
+TRANSFORMS <- list(best_loss = identity, cur_loss = identity,
+                   best_max_exp = function(y) y - 1,
+                   cur_max_exp  = function(y) y - 1)
 
 make_ui <- function() {
   page_sidebar(
@@ -31,12 +36,33 @@ make_ui <- function() {
     ),
     layout_columns(
       col_widths = c(9, 3),
-      card(
-        card_header("Loss & max expectation"),
-        radioButtons("view_mode", label = NULL,
-                     choices  = c("Min across restarts" = "min", "All restarts" = "all"),
-                     selected = "min", inline = TRUE),
-        plotlyOutput("loss_plot", height = "460px"),
+      navset_card_tab(
+        id     = "plot_tabs",
+        header = tagList(
+          tags$style(HTML("
+            .card > .card-body:not(.tab-content) { flex-grow: 0 !important; }
+            .tab-header-cbs .mb-3 { margin-bottom: 0 }
+          ")),
+          conditionalPanel(
+            "input.plot_tabs !== 'Weights'",
+            tags$div(
+              class = "tab-header-cbs d-flex gap-4 px-3 pt-1",
+              checkboxInput("view_min",  "Min across restarts", value = TRUE),
+              checkboxInput("show_best", "Best achieved",       value = TRUE)
+            )
+          )
+        ),
+        nav_panel("Loss",            plotlyOutput("loss_plot",    height = "420px")),
+        nav_panel("Max expectation", plotlyOutput("max_exp_plot", height = "420px")),
+        nav_panel("Weights",
+          tags$div(
+            class = "px-3 pt-2 pb-1",
+            radioButtons("weights_view", NULL, inline = TRUE,
+                         choices  = c("All restarts" = "all", "Mean" = "mean", "Best restart" = "best"),
+                         selected = "all")
+          ),
+          plotlyOutput("weights_plot", height = "380px")
+        ),
         full_screen = TRUE
       ),
       card(
@@ -106,7 +132,7 @@ make_server <- function(db_path) {
       intervalMillis = 1000L,
       session        = session,
       checkFunc      = function() {
-        tryCatch(dbGetQuery(con, "SELECT MAX(iter) FROM iterations")[[1L]],
+        tryCatch(dbGetQuery(con, "SELECT MAX(rowid) FROM iterations")[[1L]],
                  error = function(e) NA_integer_)
       },
       valueFunc = function() Sys.time()
@@ -201,9 +227,7 @@ make_server <- function(db_path) {
       d          <- experiments()
       fe         <- filtered_experiments()
       filters    <- active_filters()
-      active_keys <- sapply(filters, `[[`, "key")
       all_keys    <- sort(unique(d$params$key))
-      # Only show params not already fixed by an active (non-"all") filter.
       fixed_keys  <- sapply(filters, function(f) {
         val <- input[[paste0("fv_", f$id)]]
         if (!is.null(val) && val != "" && val != "__set__") f$key else NA_character_
@@ -226,34 +250,25 @@ make_server <- function(db_path) {
     # Plot data
     # ---------------------------------------------------------------------------
 
-    # Axis range spanning all filtered experiments — keeps the plot stable when
-    # switching between experiments.  Depends on db_poll so it grows as runs progress.
-    filtered_range <- reactive({
+    # Shared x range: extends as data comes in (depends on db_poll).
+    filtered_x_range <- reactive({
       db_poll()
-      fe <- filtered_experiments()
+      fe  <- filtered_experiments()
       if (nrow(fe) == 0L) return(NULL)
       ids <- paste(fe$id, collapse = ",")
-      lm <- tryCatch(
+      res <- tryCatch(
         dbGetQuery(con, sprintf(
-          "SELECT iter, metric, value FROM loss_metrics
-           WHERE experiment_id IN (%s)
-             AND metric IN ('best_loss', 'best_max_exp')
-             AND restart >= 0", ids)),
+          "SELECT MIN(iter) AS lo, MAX(iter) AS hi FROM iterations
+           WHERE experiment_id IN (%s)", ids)),
         error = function(e) NULL
       )
-      if (is.null(lm) || nrow(lm) == 0L) return(NULL)
-      y_vals <- unlist(lapply(METRICS, function(m) {
-        v <- TRANSFORMS[[m]](lm$value[lm$metric == m])
-        v[is.finite(v) & v > 0]
-      }))
-      if (length(y_vals) == 0L) return(NULL)
-      # 10 % padding in log space
-      y_log  <- log10(range(y_vals))
-      pad    <- diff(y_log) * 0.1
-      list(
-        x = c(min(lm$iter), max(lm$iter)),
-        y = c(y_log[[1L]] - pad, y_log[[2L]] + pad)
-      )
+      if (is.null(res) || is.na(res$lo)) return(NULL)
+      c(res$lo, res$hi)
+    })
+    filtered_x_range_val <- reactiveVal(NULL)
+    observe({
+      v <- filtered_x_range()
+      if (!identical(v, isolate(filtered_x_range_val()))) filtered_x_range_val(v)
     })
 
     db_data <- reactive({
@@ -263,83 +278,221 @@ make_server <- function(db_path) {
       tryCatch(
         dbGetQuery(con,
           "SELECT iter, restart, metric, value FROM loss_metrics
-           WHERE experiment_id = ? AND metric IN ('best_loss', 'best_max_exp')
+           WHERE experiment_id = ?
+             AND metric IN ('best_loss', 'cur_loss', 'best_max_exp', 'cur_max_exp')
            ORDER BY iter, restart",
           list(exp_id)),
         error = function(e) empty_lm()
       )
     })
 
-    # Re-renders on view_mode or experiment switch; data updates go via restyle.
-    output$loss_plot <- renderPlotly({
-      lm   <- isolate(db_data())
-      view <- input$view_mode
-      input$experiment_id   # reactive dep so experiment switch triggers redraw
+    weights_data <- reactive({
+      db_poll()
+      exp_id <- suppressWarnings(as.integer(input$experiment_id))
+      if (length(exp_id) == 0L || is.na(exp_id)) return(NULL)
+      type_filter <- if (input$show_best) "best_weight" else "cur_weight"
+      tryCatch(
+        dbGetQuery(con,
+          "SELECT restart, component, value FROM profiles
+           WHERE experiment_id = ?
+             AND type = ?
+             AND iter = (SELECT MAX(iter) FROM profiles WHERE experiment_id = ?)
+           ORDER BY restart, component",
+          list(exp_id, type_filter, exp_id)),
+        error = function(e) NULL
+      )
+    })
 
-      p <- plot_ly()
-      if (view == "min") {
-        for (m in METRICS) {
+    # Creates all reactive/observer/render infrastructure for one plot tab.
+    # Captured from enclosing scope: session, input, output, con,
+    #   filtered_experiments, filtered_x_range_val, db_data.
+    make_plot_server <- function(plot_id, tab_name, metric_fn, y_metrics) {
+
+      # Per-plot y range — fixed at filter time, no db_poll dependency.
+      filtered_y_range <- reactive({
+        fe  <- filtered_experiments()
+        if (nrow(fe) == 0L) return(NULL)
+        ids <- paste(fe$id, collapse = ",")
+        lm  <- tryCatch(
+          dbGetQuery(con, sprintf(
+            "SELECT metric, value FROM loss_metrics
+             WHERE experiment_id IN (%s)
+               AND metric IN (%s)
+               AND restart >= 0",
+            ids,
+            paste(sprintf("'%s'", y_metrics), collapse = ","))),
+          error = function(e) NULL
+        )
+        if (is.null(lm) || nrow(lm) == 0L) return(NULL)
+        y_vals <- unlist(lapply(y_metrics, function(m) {
+          v <- TRANSFORMS[[m]](lm$value[lm$metric == m])
+          v[is.finite(v) & v > 0]
+        }))
+        if (length(y_vals) == 0L) return(NULL)
+        y_log <- log10(range(y_vals))
+        pad   <- diff(y_log) * 0.1
+        c(y_log[[1L]] - pad, y_log[[2L]] + pad)
+      })
+      filtered_y_range_val <- reactiveVal(NULL)
+      observe({
+        v <- filtered_y_range()
+        if (!identical(v, isolate(filtered_y_range_val()))) filtered_y_range_val(v)
+      })
+
+      # Per-axis zoom state.
+      user_zoom_x   <- reactiveVal(NULL)
+      user_zoom_y   <- reactiveVal(NULL)
+      last_manual_x <- NULL
+      last_manual_y <- NULL
+      zoom_active   <- FALSE
+
+      observeEvent(filtered_y_range_val(), {
+        user_zoom_x(NULL); user_zoom_y(NULL)
+        last_manual_x <<- NULL; last_manual_y <<- NULL
+        zoom_active   <<- FALSE
+      }, ignoreInit = TRUE, ignoreNULL = TRUE)
+
+      observe({
+        req(isTRUE(input$plot_tabs == tab_name))
+        rly <- event_data("plotly_relayout", source = plot_id)
+        if (is.null(rly)) return()
+        has_x      <- !is.null(rly[["xaxis.range[0]"]])
+        has_y      <- !is.null(rly[["yaxis.range[0]"]])
+        is_autorng <- isTRUE(rly[["xaxis.autorange"]]) || isTRUE(rly[["yaxis.autorange"]])
+        if (is_autorng) {
+          if (zoom_active) {
+            user_zoom_x(NULL); user_zoom_y(NULL)
+            zoom_active <<- FALSE
+          } else if (!is.null(last_manual_x) || !is.null(last_manual_y)) {
+            user_zoom_x(last_manual_x); user_zoom_y(last_manual_y)
+            zoom_active <<- TRUE
+          }
+        } else if (has_x || has_y) {
+          if (has_x) {
+            new_x <- c(rly[["xaxis.range[0]"]], rly[["xaxis.range[1]"]])
+            user_zoom_x(new_x); last_manual_x <<- new_x
+          }
+          if (has_y) {
+            new_y <- c(rly[["yaxis.range[0]"]], rly[["yaxis.range[1]"]])
+            user_zoom_y(new_y); last_manual_y <<- new_y
+          }
+          zoom_active <<- TRUE
+        }
+      })
+
+      # Redraws on new data, tab switch, metric change, or view change.
+      # Shiny uses Plotly.react() for output updates, so this is an efficient
+      # diff rather than a full destroy+create. Zoom state is preserved via
+      # reactiveVals read with isolate().
+      output[[plot_id]] <- renderPlotly({
+        input$plot_tabs
+        lm   <- db_data()
+        m    <- metric_fn()
+        view <- if (input$view_min) "min" else "all"
+
+        rng_x <- if (!is.null(isolate(user_zoom_x()))) isolate(user_zoom_x())
+                 else isolate(filtered_x_range_val())
+        rng_y <- if (!is.null(isolate(user_zoom_y()))) isolate(user_zoom_y())
+                 else isolate(filtered_y_range_val())
+
+        p <- plot_ly(source = plot_id)
+        if (view == "min") {
           td <- min_by_iter(lm, m)
           p  <- add_trace(p, x = td$x, y = td$y,
                           name = LABELS[[m]], type = "scatter", mode = "lines",
                           line = list(color = COLORS[[m]]))
-        }
-      } else {
-        for (m in METRICS) {
+        } else {
           rts <- by_restart(lm, m)
           if (length(rts) == 0L) {
             p <- add_trace(p, x = NA_real_, y = NA_real_,
-                           name = LABELS[[m]], legendgroup = m,
-                           type = "scatter", mode = "lines",
+                           name = LABELS[[m]], type = "scatter", mode = "lines",
                            line = list(color = COLORS[[m]]))
           } else {
             for (ri in seq_along(rts)) {
               p <- add_trace(p, x = rts[[ri]]$x, y = rts[[ri]]$y,
-                             name = LABELS[[m]], legendgroup = m,
-                             showlegend = (ri == 1L),
+                             name = LABELS[[m]], showlegend = (ri == 1L),
                              type = "scatter", mode = "lines",
                              line = list(color = COLORS[[m]], width = 1))
             }
           }
         }
+        p |>
+          layout(
+            xaxis = list(title = "Iteration", range = rng_x),
+            yaxis = list(title = "Value", type = "log", range = rng_y)
+          ) |>
+          event_register("plotly_relayout")
+      })
+    }
+
+    make_plot_server(
+      plot_id   = "loss_plot",
+      tab_name  = "Loss",
+      metric_fn = reactive(if (input$show_best) "best_loss" else "cur_loss"),
+      y_metrics = c("best_loss", "cur_loss")
+    )
+    make_plot_server(
+      plot_id   = "max_exp_plot",
+      tab_name  = "Max expectation",
+      metric_fn = reactive(if (input$show_best) "best_max_exp" else "cur_max_exp"),
+      y_metrics = c("best_max_exp", "cur_max_exp")
+    )
+
+    output$weights_plot <- renderPlotly({
+      input$plot_tabs
+      wd   <- weights_data()
+      view <- input$weights_view
+      if (is.null(wd) || nrow(wd) == 0L) {
+        return(plot_ly(x = numeric(0), y = numeric(0), type = "bar"))
       }
-      rng <- isolate(filtered_range())
-      p |> layout(
-        xaxis = list(title = "Iteration",
-                     range = if (!is.null(rng)) rng$x else NULL),
-        yaxis = list(title = "Value", type = "log",
-                     range = if (!is.null(rng)) rng$y else NULL)
-      )
-    })
 
-    # Keep axis range updated between full redraws.
-    observe({
-      rng <- filtered_range()
-      if (is.null(rng)) return()
-      plotlyProxy("loss_plot", session) |>
-        plotlyProxyInvoke("relayout", list(
-          "xaxis.range[0]" = rng$x[[1L]], "xaxis.range[1]" = rng$x[[2L]],
-          "yaxis.range[0]" = rng$y[[1L]], "yaxis.range[1]" = rng$y[[2L]]
-        ))
-    })
+      restarts <- sort(unique(wd$restart))
+      bar_color <- "#2c7bb6"
 
-    observe({
-      lm   <- db_data()
-      view <- isolate(input$view_mode)
-      if (nrow(lm) == 0L) return()
-      if (view == "min") {
-        xs <- lapply(METRICS, function(m) min_by_iter(lm, m)$x)
-        ys <- lapply(METRICS, function(m) min_by_iter(lm, m)$y)
-        plotlyProxy("loss_plot", session) |>
-          plotlyProxyInvoke("restyle", list(x = xs, y = ys), as.list(0:1))
+      no_yaxis <- list(visible = FALSE)
+
+      if (view == "mean") {
+        mean_w <- tapply(wd$value, wd$component, mean)
+        plot_ly() |>
+          add_trace(x = as.integer(names(mean_w)), y = as.numeric(mean_w),
+                    type = "bar", marker = list(color = bar_color),
+                    showlegend = FALSE) |>
+          layout(xaxis = list(title = "Component"), yaxis = no_yaxis)
+
+      } else if (view == "best") {
+        lm     <- isolate(db_data())
+        metric <- if (isolate(input$show_best)) "best_loss" else "cur_loss"
+        sub    <- lm[lm$metric == metric & lm$restart >= 0L, ]
+        best_r <- if (nrow(sub) > 0L) {
+          li <- max(sub$iter)
+          sl <- sub[sub$iter == li, ]
+          sl$restart[which.min(sl$value)]
+        } else restarts[[1L]]
+        wd_r <- wd[wd$restart == best_r, ]
+        plot_ly() |>
+          add_trace(x = wd_r$component, y = wd_r$value,
+                    type = "bar", marker = list(color = bar_color),
+                    showlegend = FALSE) |>
+          layout(xaxis = list(title = "Component"), yaxis = no_yaxis)
+
       } else {
-        R <- length(unique(lm$restart[lm$restart >= 0L]))
-        if (R == 0L) return()
-        flat <- unlist(lapply(METRICS, function(m) by_restart(lm, m)), recursive = FALSE)
-        plotlyProxy("loss_plot", session) |>
-          plotlyProxyInvoke("restyle",
-            list(x = lapply(flat, `[[`, "x"), y = lapply(flat, `[[`, "y")),
-            as.list(seq_along(flat) - 1L))
+        plots <- lapply(restarts, function(r) {
+          wd_r <- wd[wd$restart == r, ]
+          plot_ly() |>
+            add_trace(x = wd_r$component, y = wd_r$value,
+                      type = "bar", marker = list(color = bar_color),
+                      showlegend = FALSE) |>
+            layout(
+              yaxis = no_yaxis,
+              annotations = list(list(
+                x = 0, y = 1, xref = "paper", yref = "paper",
+                text = paste0("<b>R", r, "</b>"), showarrow = FALSE,
+                xanchor = "left", yanchor = "bottom", font = list(size = 10)
+              ))
+            )
+        })
+        subplot(plots, nrows = length(restarts), shareX = TRUE, margin = 0.06) |>
+          layout(xaxis = list(title = "Component"))
       }
     })
 

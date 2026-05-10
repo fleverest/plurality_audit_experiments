@@ -445,7 +445,7 @@ lbfgs <- function(lr = 1, max_iter = 20, history_size = 100) {
         op$zero_grad()
         w   <- nnf_softmax(params[[1]], dim = 2)
         fwd <- fwd_fn(w$log())
-        g   <- bwd_fn(w, fwd$above_mask, fwd$llr, fwd$llr_denom)
+        g   <- bwd_fn(w, fwd$llr, fwd$llr_denom)
         params[[1]]$grad <- g$grad_u
         fwd$losses$sum()
       })
@@ -455,7 +455,7 @@ lbfgs <- function(lr = 1, max_iter = 20, history_size = 100) {
 
 # ---------------------------------------------------------------------------
 
-#' Minimise sum_theta max(0, E_theta[Q(X)/P_w(X)] - 1) over mixture weights via parallel restarts
+#' Minimise D(q || P_w) = E_q[log(q(X)/P_w(X))] over mixture weights via parallel restarts
 #'
 #' Runs `n_restarts` simultaneous optimisations from random Dirichlet
 #' initialisations. Pre-computes the count tensor, log-PMFs, and per-component
@@ -562,6 +562,10 @@ optimize_mixture_weights <- function(
   llr_num <- matmul_0_ninf(X, log_q$unsqueeze(2))$squeeze(2)
   log_comp_denoms <- matmul_0_ninf(X, log_ws)
 
+  log_q_mass      <- mnom_logpmf(X, log_q$unsqueeze(2L), n)$squeeze(2L)
+  q_mass_vec      <- log_q_mass$exp()
+  log_q_mass_ninf <- torch_isneginf(log_q_mass)
+
   buf_MRC <- torch_empty(c(M_, n_restarts, C_), device = device, dtype = dtype)
   buf_MTR <- torch_empty(c(M_, T_, n_restarts), device = device, dtype = dtype)
   buf_MT  <- torch_empty(c(M_, T_), device = device, dtype = dtype)
@@ -571,7 +575,7 @@ optimize_mixture_weights <- function(
 
   # Forward pass: compute losses and intermediates for a batch of weight vectors.
   # log_wts: (n_restarts, C) log mixture weights.
-  # Returns list(losses, exp_llr, max_exp_llr, above_mask, llr, llr_denom).
+  # Returns list(losses, base_losses, exp_llr, max_exp_llr, above_mask, llr, llr_denom).
   eval_weights <- function(log_wts) {
     add_ninf_any_(buf_MRC, log_comp_denoms$unsqueeze(2L), log_wts$unsqueeze(1L), logcd_ninf$unsqueeze(2L))
     llr_denom <- logsumexp_inplace_(buf_MRC, dim = 3L)
@@ -579,7 +583,9 @@ optimize_mixture_weights <- function(
     add_ninf_any_(buf_MTR, log_pmf$unsqueeze(3L), llr$unsqueeze(2L), logpmf_ninf$unsqueeze(3L))
     exp_llr <- logsumexp_inplace_(buf_MTR, dim = 1L)$exp()
     above_mask <- exp_llr > 1
-    base_losses <- (exp_llr - 1)$clamp(min = 0)$sum(dim = 1L)
+    kl_terms <- q_mass_vec$unsqueeze(2L) * llr
+    kl_terms$nan_to_num_(nan = 0.0)
+    base_losses <- kl_terms$sum(dim = 1L)
     penalty <- torch_zeros_like(base_losses)
     if (lin_smooth > 0 || log_smooth > 0) {
       w <- log_wts$exp()
@@ -603,17 +609,16 @@ optimize_mixture_weights <- function(
     )
   }
 
-  # Gradient of sum_theta max(0, E_theta[...] - 1) w.r.t. weights (and logits).
+  # Gradient of D(q || P_w) w.r.t. weights (and logits).
   # weights: (n_restarts, C) simplex weights.
-  # above_mask, llr, llr_denom: intermediates from eval_weights.
+  # llr, llr_denom: intermediates from eval_weights.
   # Returns list(grad_w, grad_u) where grad_u is only present when use_softmax.
-  compute_grad <- function(weights, above_mask, llr, llr_denom) {
-    buf_MT$copy_(log_pmf)$exp_()
-    active_pmf_sum <- buf_MT$matmul(above_mask$to(dtype = dtype))
-    buf_MRC$copy_(active_pmf_sum$log()$unsqueeze(3L))
-    buf_MRC$add_(llr$unsqueeze(3L))
+  compute_grad <- function(weights, llr, llr_denom) {
+    buf_MRC$copy_(log_q_mass$unsqueeze(2L)$unsqueeze(3L))
     buf_MRC$add_(log_comp_denoms$unsqueeze(2L))
     buf_MRC$sub_(llr_denom$unsqueeze(3L))
+    buf_MRC$masked_fill_(logcd_ninf$unsqueeze(2L), -Inf)
+    buf_MRC$masked_fill_(log_q_mass_ninf$unsqueeze(2L)$unsqueeze(3L), -Inf)
     grad_w <- -logsumexp_inplace_(buf_MRC, dim = 1L)$exp()
 
     if (lin_smooth > 0 || log_smooth > 0) {
@@ -721,7 +726,7 @@ optimize_mixture_weights <- function(
       best_max_exp <- torch_where(improved_max, fwd$max_exp_llr, best_max_exp)
       best_weights_max_exp[improved_max, ] <- weights[improved_max, ]
 
-      grads <- compute_grad(weights, fwd$above_mask, fwd$llr, fwd$llr_denom)
+      grads <- compute_grad(weights, fwd$llr, fwd$llr_denom)
       if (use_softmax) {
         unconstrained_weights$grad <- grads$grad_u
       } else {

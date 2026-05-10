@@ -4,7 +4,10 @@ box::use(
     aes,
     geom_raster,
     geom_line,
+    geom_point,
+    geom_segment,
     scale_fill_gradientn,
+    scale_x_continuous,
     scale_x_discrete,
     scale_y_discrete,
     scale_y_log10,
@@ -15,6 +18,50 @@ box::use(
   reshape2[melt],
   dplyr[filter, mutate]
 )
+
+#' Lollipop plot of boundary mixture weights
+#'
+#' Plots the weight assigned to each atom in the output of [run_boundary_ripr()].
+#' The x-axis is the boundary parameter s in [0, 1], which traces the null
+#' boundary from (1/2, 1/2, 0) through (1/3, 1/3, 1/3) to (1/2, 0, 1/2).
+#'
+#' @param boundary_result Output list from [run_boundary_ripr()].
+#' @return A ggplot object.
+#' @export
+plot_boundary_weights <- function(boundary_result, cdf = FALSE) {
+  # Invert null_boundary_3: recover s from atom theta vector.
+  atom_to_s <- function(theta) {
+    if (theta[2L] >= theta[3L]) 1.5 - 3 * theta[1L]  # segment 1: theta = (t,t,1-2t)
+    else                        3 * theta[1L] - 0.5   # segment 2: theta = (t,1-2t,t)
+  }
+
+  s <- vapply(boundary_result$ws_list, atom_to_s, numeric(1L))
+  w <- boundary_result$weights
+
+  df <- data.frame(s = s, weight = w)
+
+  if (cdf) {
+    df <- df[order(df$s), ]
+    df$weight <- cumsum(df$weight)
+  }
+
+  p <- ggplot(df, aes(x = s, y = weight))
+  p <- if (cdf) p + geom_line(colour = "steelblue") + geom_point(size = 1, colour = "steelblue")
+       else     p + geom_segment(aes(xend = s, yend = 0), linewidth = 0.4, colour = "steelblue") +
+                    geom_point(size = 1.5, colour = "steelblue")
+
+  p +
+    scale_x_continuous(
+      breaks = c(0, 0.5, 1),
+      labels = c("(1/2,1/2,0)", "(1/3,1/3,1/3)", "(1/2,0,1/2)")
+    ) +
+    labs(
+      x = "Boundary atom",
+      y = if (cdf) "Cumulative weight" else "Mixture weight",
+      title = sprintf("Boundary mixture (%d atoms)", boundary_result$n_atoms)
+    ) +
+    theme_minimal()
+}
 
 #' Heatmap of optimised mixture weights across restarts, ordered by loss
 #'

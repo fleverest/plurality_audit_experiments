@@ -7,7 +7,7 @@ box::use(
     renderText, verbatimTextOutput,
     tagList, tags, req, conditionalPanel, HTML
   ],
-  plotly[plot_ly, add_trace, layout, subplot, plotlyOutput, renderPlotly,
+  plotly[plot_ly, add_trace, layout, plotlyOutput, renderPlotly,
          event_data, event_register],
   bslib[page_sidebar, sidebar, layout_columns, card, card_header,
         navset_card_tab, nav_panel],
@@ -56,10 +56,11 @@ make_ui <- function() {
         nav_panel("Max expectation", plotlyOutput("max_exp_plot", height = "420px")),
         nav_panel("Weights",
           tags$div(
-            class = "px-3 pt-2 pb-1",
+            class = "d-flex gap-4 px-3 pt-2 pb-1",
             radioButtons("weights_view", NULL, inline = TRUE,
                          choices  = c("All restarts" = "all", "Mean" = "mean", "Best restart" = "best"),
-                         selected = "all")
+                         selected = "all"),
+            checkboxInput("weights_log", "Log scale", value = FALSE)
           ),
           plotlyOutput("weights_plot", height = "380px")
         ),
@@ -133,6 +134,17 @@ make_server <- function(db_path) {
       session        = session,
       checkFunc      = function() {
         tryCatch(dbGetQuery(con, "SELECT MAX(rowid) FROM iterations")[[1L]],
+                 error = function(e) NA_integer_)
+      },
+      valueFunc = function() Sys.time()
+    )
+
+    # Slow poll for profiles: weights change infrequently and are expensive to render.
+    profiles_poll <- reactivePoll(
+      intervalMillis = 5000L,
+      session        = session,
+      checkFunc      = function() {
+        tryCatch(dbGetQuery(con, "SELECT MAX(rowid) FROM profiles")[[1L]],
                  error = function(e) NA_integer_)
       },
       valueFunc = function() Sys.time()
@@ -287,18 +299,16 @@ make_server <- function(db_path) {
     })
 
     weights_data <- reactive({
-      db_poll()
+      profiles_poll()
       exp_id <- suppressWarnings(as.integer(input$experiment_id))
       if (length(exp_id) == 0L || is.na(exp_id)) return(NULL)
       type_filter <- if (input$show_best) "best_weight" else "cur_weight"
       tryCatch(
         dbGetQuery(con,
           "SELECT restart, component, value FROM profiles
-           WHERE experiment_id = ?
-             AND type = ?
-             AND iter = (SELECT MAX(iter) FROM profiles WHERE experiment_id = ?)
+           WHERE experiment_id = ? AND type = ?
            ORDER BY restart, component",
-          list(exp_id, type_filter, exp_id)),
+          list(exp_id, type_filter)),
         error = function(e) NULL
       )
     })
@@ -440,59 +450,67 @@ make_server <- function(db_path) {
 
     output$weights_plot <- renderPlotly({
       input$plot_tabs
-      wd   <- weights_data()
-      view <- input$weights_view
+      wd      <- weights_data()
+      view    <- input$weights_view
+      log_sc  <- input$weights_log
+      yaxis   <- list(title = "", type = if (log_sc) "log" else "linear")
       if (is.null(wd) || nrow(wd) == 0L) {
-        return(plot_ly(x = numeric(0), y = numeric(0), type = "bar"))
+        return(plot_ly(type = "scatter", mode = "lines"))
       }
 
-      restarts <- sort(unique(wd$restart))
-      bar_color <- "#2c7bb6"
+      restarts  <- sort(unique(wd$restart))
+      blue      <- "#2c7bb6"
+      xaxis     <- list(title = "Component", dtick = 1)
 
-      no_yaxis <- list(visible = FALSE)
-
-      if (view == "mean") {
-        mean_w <- tapply(wd$value, wd$component, mean)
-        plot_ly() |>
-          add_trace(x = as.integer(names(mean_w)), y = as.numeric(mean_w),
-                    type = "bar", marker = list(color = bar_color),
-                    showlegend = FALSE) |>
-          layout(xaxis = list(title = "Component"), yaxis = no_yaxis)
-
-      } else if (view == "best") {
+      # Determine best restart from latest loss data.
+      best_restart <- function() {
         lm     <- isolate(db_data())
         metric <- if (isolate(input$show_best)) "best_loss" else "cur_loss"
         sub    <- lm[lm$metric == metric & lm$restart >= 0L, ]
-        best_r <- if (nrow(sub) > 0L) {
-          li <- max(sub$iter)
-          sl <- sub[sub$iter == li, ]
-          sl$restart[which.min(sl$value)]
-        } else restarts[[1L]]
-        wd_r <- wd[wd$restart == best_r, ]
-        plot_ly() |>
-          add_trace(x = wd_r$component, y = wd_r$value,
-                    type = "bar", marker = list(color = bar_color),
-                    showlegend = FALSE) |>
-          layout(xaxis = list(title = "Component"), yaxis = no_yaxis)
+        if (nrow(sub) == 0L) return(restarts[[1L]])
+        sl <- sub[sub$iter == max(sub$iter), ]
+        sl$restart[which.min(sl$value)]
+      }
+
+      if (view == "mean") {
+        mean_w <- tapply(wd$value, wd$component, mean)
+        plot_ly(x = as.integer(names(mean_w)), y = as.numeric(mean_w),
+                name = "Mean", type = "scatter", mode = "lines",
+                line   = list(color = blue, width = 1.5),
+                marker = list(color = blue, size = 4)) |>
+          layout(xaxis = xaxis, yaxis = yaxis, showlegend = FALSE)
+
+      } else if (view == "best") {
+        best_r <- best_restart()
+        wd_r   <- wd[wd$restart == best_r, ]
+        plot_ly(x = wd_r$component, y = wd_r$value,
+                name = paste0("R", best_r), type = "scatter", mode = "lines",
+                line   = list(color = blue, width = 1.5),
+                marker = list(color = blue, size = 4)) |>
+          layout(xaxis = xaxis, yaxis = yaxis, showlegend = FALSE)
 
       } else {
-        plots <- lapply(restarts, function(r) {
-          wd_r <- wd[wd$restart == r, ]
-          plot_ly() |>
-            add_trace(x = wd_r$component, y = wd_r$value,
-                      type = "bar", marker = list(color = bar_color),
-                      showlegend = FALSE) |>
-            layout(
-              yaxis = no_yaxis,
-              annotations = list(list(
-                x = 0, y = 1, xref = "paper", yref = "paper",
-                text = paste0("<b>R", r, "</b>"), showarrow = FALSE,
-                xanchor = "left", yanchor = "bottom", font = list(size = 10)
-              ))
-            )
-        })
-        subplot(plots, nrows = length(restarts), shareX = TRUE, margin = 0.06) |>
-          layout(xaxis = list(title = "Component"))
+        best_r   <- best_restart()
+        non_best <- wd[wd$restart != best_r, ]
+        wd_best  <- wd[wd$restart == best_r, ]
+        p <- plot_ly(
+          non_best, x = ~component, y = ~value,
+          split = ~paste0("R", restart),
+          type = "scatter", mode = "lines",
+          color = I("#aaaaaa"),
+          line   = list(width = 1),
+          marker = list(size = 4)
+        ) |>
+          add_trace(
+            data = wd_best, x = ~component, y = ~value,
+            split = NULL, color = NULL,
+            name = paste0("R", best_r),
+            type = "scatter", mode = "lines",
+            line   = list(color = blue, width = 2),
+            marker = list(color = blue, size = 4)
+          ) |>
+          layout(xaxis = xaxis, yaxis = yaxis)
+        p
       }
     })
 

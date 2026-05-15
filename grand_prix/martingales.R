@@ -498,6 +498,9 @@ DirectRIPrSequenceTest <- new_class(
 )
 
 method(update, DirectRIPrSequenceTest) <- function(stat, new_x = NULL, ...) {
+  if (is_stopped(stat)) {
+    message("DirectRIPrSequenceTest has already stopped. Use reset() to restart.")
+  }
   if (is.null(new_x)) {
     if (is.null(stat@stream)) stop("Provide new_x or attach a stream.")
     new_x <- fetch(stat@stream)
@@ -586,6 +589,150 @@ method(print, DirectRIPrSequenceTest) <- function(x, ...) {
   cat("Current Z_t:", round(tail(x@state$history_Z, 1L), 4), "\n")
   cat("Current Y_t:", round(tail(x@state$history_Y, 1L), 4), "\n")
   cat("Current a_t:", round(tail(x@state$history_a, 1L), 4), "\n")
+  cat("Rejection threshold:", round(1 / x@alpha, 4), "\n")
+  cat("Decision:", decision(x), "\n")
+  invisible(x)
+}
+
+
+# ---------------------------------------------------------------------------
+# BatchRIPr — product of fixed-n RIPr e-values over non-overlapping batches
+# ---------------------------------------------------------------------------
+#
+# Processes observations in non-overlapping batches of size `batch_size`.
+# At each batch boundary t = k * batch_size the e-value is:
+#   E_k = Y_{batch_size}(c_k) / E_ratio
+# where c_k are the counts for the k-th batch and E_ratio is the max
+# E_theta from the final RIPr optimisation step (a small correction ≥ 1
+# guaranteeing E_theta[E_k] ≤ 1 for all theta in H_0). Between boundaries
+# the martingale value is unchanged (factor of 1).
+#
+# The running product M_t = ∏_{k: k*batch_size ≤ t} E_k is a valid test
+# martingale: each factor has expectation ≤ 1 under H_0, and the factors
+# are independent across batches.
+
+BatchRIPr <- new_class(
+  "BatchRIPr",
+  parent = Test,
+  properties = list(
+    q           = class_numeric,
+    batch_size  = class_integer,
+    alpha       = class_numeric,
+    results_dir = class_character
+  ),
+  constructor = function(q, batch_size = 100L, alpha = 0.05, results_dir = "results", stream = NULL) {
+    K          <- length(q)
+    batch_size <- as.integer(batch_size)
+    if (K < 2L || any(q <= 0) || abs(sum(q) - 1) > 1e-10)
+      stop("q must be a probability vector of length >= 2 summing to 1")
+    if (q[1L] <= max(q[-1L]))
+      stop("q[1] must exceed max(q[-1]): candidate 1 is the announced winner")
+    if (alpha <= 0 || alpha >= 1)
+      stop("alpha must be in (0, 1)")
+    if (batch_size < 1L)
+      stop("batch_size must be a positive integer")
+    if (!dir.exists(results_dir))
+      dir.create(results_dir, recursive = TRUE)
+
+    ripr             <- .load_or_compute_ripr(batch_size, q, results_dir)
+    correction       <- log(tail(ripr$atom_history, 1L)[[1L]]$E_ratio)
+
+    state <- new.env(parent = emptyenv())
+    state$ripr         <- ripr
+    state$correction   <- correction  # subtracted from each batch log e-value
+    state$batch_counts <- integer(K)    # counts within the current incomplete batch
+    state$log_m        <- 0             # log running product
+    state$history      <- 1
+    state$n            <- 0L
+    state$stop_time    <- NA_integer_
+    state$decision     <- "continue"
+
+    new_object(
+      S7_object(),
+      q           = q,
+      batch_size  = batch_size,
+      alpha       = alpha,
+      results_dir = results_dir,
+      stream      = stream,
+      description = sprintf("Batch RIPr test martingale (batch=%d, %d-candidate plurality)", batch_size, K),
+      state       = state
+    )
+  }
+)
+
+method(update, BatchRIPr) <- function(stat, new_x = NULL, ...) {
+  if (is_stopped(stat)) {
+    message("BatchRIPr has already stopped. Use reset() to restart.")
+  }
+  if (is.null(new_x)) {
+    if (is.null(stat@stream)) stop("Provide new_x or attach a stream.")
+    new_x <- fetch(stat@stream)
+  }
+  if (length(new_x) == 0) return(invisible(stat))
+
+  threshold <- 1 / stat@alpha
+  old_n     <- stat@state$n
+  log_q     <- log(stat@q)
+  K         <- length(stat@q)
+  new_vals  <- numeric(length(new_x))
+
+  for (i in seq_along(new_x)) {
+    x <- new_x[i]
+    stat@state$batch_counts[x] <- stat@state$batch_counts[x] + 1L
+
+    if ((old_n + i) %% stat@batch_size == 0L) {
+      log_Y <- .log_Y(stat@state$batch_counts, stat@state$ripr, log_q)
+      stat@state$log_m        <- stat@state$log_m + log_Y - stat@state$correction
+      stat@state$batch_counts <- integer(K)
+    }
+
+    new_vals[i] <- exp(stat@state$log_m)
+  }
+
+  stat@state$history <- c(stat@state$history, new_vals)
+  stat@state$n       <- old_n + length(new_x)
+
+  if (!is_stopped(stat)) {
+    crossed <- which(new_vals >= threshold)
+    if (length(crossed) > 0L) {
+      stat@state$decision  <- "reject_H0"
+      stat@state$stop_time <- old_n + crossed[1L]
+      message("BatchRIPr: rejection threshold reached.")
+    }
+  }
+
+  invisible(stat)
+}
+
+method(reset, BatchRIPr) <- function(object, ...) {
+  object@state$batch_counts <- integer(length(object@q))
+  object@state$log_m        <- 0
+  object@state$history      <- 1
+  object@state$n            <- 0L
+  object@state$stop_time    <- NA_integer_
+  object@state$decision     <- "continue"
+  if (!is.null(object@stream)) reset(object@stream)
+  invisible(object)
+}
+
+method(is_stopped, BatchRIPr)    <- function(stat, ...) decision(stat) != "continue"
+method(decision, BatchRIPr)      <- function(test, ...) test@state$decision
+method(n_obs, BatchRIPr)         <- function(stat, ...) stat@state$n
+method(stopping_time, BatchRIPr) <- function(test, ...) test@state$stop_time
+
+method(value, BatchRIPr) <- function(stat, n = 1L, ...) {
+  tail(stat@state$history, n = n)
+}
+
+method(print, BatchRIPr) <- function(x, ...) {
+  K <- length(x@q)
+  cat(sprintf("Batch RIPr test martingale (batch=%d, %d-candidate plurality)\n", x@batch_size, K))
+  cat("q:", x@q, "\n")
+  cat("Observations:", x@state$n, "\n")
+  cat("Completed batches:", x@state$n %/% x@batch_size, "\n")
+  cat("Batch counts so far:", x@state$batch_counts, "\n")
+  if (is_stopped(x)) cat("Stopping time:", x@state$stop_time, "\n")
+  cat("Current M_t:", round(tail(x@state$history, 1L), 4), "\n")
   cat("Rejection threshold:", round(1 / x@alpha, 4), "\n")
   cat("Decision:", decision(x), "\n")
   invisible(x)

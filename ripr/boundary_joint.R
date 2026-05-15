@@ -174,7 +174,8 @@ optimise_two_atoms <- function(n, q, grid = 50L) {
   list(
     mixture     = mixture_mnom(
       atoms   = cbind(atom1, atom2),
-      weights = c(w1, 1 - w1)
+      weights = c(w1, 1 - w1),
+      n       = n
     ),
     s1          = s1,
     s2          = s2,

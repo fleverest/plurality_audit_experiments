@@ -340,7 +340,8 @@ run_boundary_ripr <- function(
   list(
     mixture = mixture_mnom(
       atoms = do.call(cbind, atoms),
-      weights = weights
+      weights = weights,
+      n = n
     ),
     history = history[!sapply(history, is.null)],
     converged = converged

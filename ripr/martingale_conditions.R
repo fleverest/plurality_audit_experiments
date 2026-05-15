@@ -145,26 +145,3 @@ left_mass <- sapply(seq_along(weights), function(i) {
   w <- weights[[i]][which.min(results[[i]]$final_max_exp), ]
   sum(w[1:501])
 })
-
-
-# Try tweaking some weights manually to see how it affects max expectation
-w <- weights[[5]][which.min(results[[5]]$final_max_exp), ]
-which(w > 0.01)
-w_new <- w
-plot(w_new[301:312])
-leftpeak_sum <- sum(w_new[301:312])
-w_new[301:312] <- c(
-  0.01, 0.015, 0.02, 0.03, 0.05, 0.11, 0.20, 0.11, 0.05, 0.03, 0.02, 0.015
-)
-w_new[301:312] <- w_new[301:312] / sum(w_new[301:312]) * leftpeak_sum
-
-# Now compute new max_expectation with w_new instead of w.
-log_wts_row <- torch_tensor(w_new, device = device, dtype = dtype)$log()$unsqueeze(1L)  # (1, C)
-x_full    <- build_counts_tensor(ns[5])                                      # (M_full, 3)
-log_Qx_f  <- mnom_logpmf(x_full, log_q$unsqueeze(2L), ns[5])[, 1L]          # (M_full,)
-log_Pw_f  <- torch_logsumexp(mnom_logpmf(x_full, log_ws, ns[5]) + log_wts_row, dim = 2L)
-e_full    <- (log_Qx_f - log_Pw_f)$exp()                                # (M_full,)
-log_pmf_theta <- mnom_logpmf(x_full, log_theta, ns[5])                      # (M_full, T)
-max_exp_new <- (log_pmf_theta$exp()$t()$mv(e_full))$max()$item()            # scalar
-cat("Original max expectation:", results[[5]]$final_max_exp, "\n")
-cat("New max expectation:", max_exp_new, "\n")

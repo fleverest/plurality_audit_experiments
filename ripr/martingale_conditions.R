@@ -6,15 +6,15 @@
 
 box::use(
   ripr / multinomial[build_counts_tensor, mnom_logpmf],
-  ripr / grids[make_simplex_grid],
+  ripr / grids[make_2d_simplex_grid],
   ripr / torch_settings[device, dtype],
   torch[torch_tensor, torch_logsumexp, torch_stack, torch_eye]
 )
 
 # Reconstruct the grids used in optimisation (must match smoke_test.R)
 q      <- c(7 / 16, 5 / 16, 4 / 16)
-thetas <- make_simplex_grid(10001)
-ws     <- make_simplex_grid(1001)
+thetas <- make_2d_simplex_grid(10001)
+ws     <- make_2d_simplex_grid(1001)
 
 to_log_tensor <- function(prob_list) {
   do.call(rbind, prob_list) |>

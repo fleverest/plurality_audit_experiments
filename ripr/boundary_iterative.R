@@ -6,7 +6,8 @@ box::use(
   ],
   ripr / torch_settings[device, dtype],
   ripr / tensor_ops[matmul_0_ninf, add_ninf_any_],
-  ripr / multinomial[build_counts_tensor]
+  ripr / multinomial[build_counts_tensor],
+  ripr / mixture[mixture_mnom, log_pmf]
 )
 
 # Initial atom on face j: project q onto face j by projection along the line from q to e_j.
@@ -133,7 +134,9 @@ reweight_mirror <- function(w_init, loss_and_grad, max_iter = 1000L, tol = 1e-12
 #' via [logsumexp_inplace_()].
 #'
 #' @param n Total ballot count.
-#' @param q Numeric vector of length K — the numerator distribution Q.
+#' @param q A `mixture_mnom` — the numerator distribution Q. Use [point_mnom()]
+#'   for a single point alternative or [dirichlet_mnom()] for a grid-weighted
+#'   Dirichlet prior over H_1. K is inferred from `nrow(q@atoms)`.
 #' @param atoms_per_face Number of atoms to add per boundary face. Default: 50.
 #' @param oracle_grid Grid density per simplex dimension for the boundary oracle.
 #'   Total lattice points per face ~ oracle_grid^(K-2); reduce for K >= 4.
@@ -143,8 +146,7 @@ reweight_mirror <- function(w_init, loss_and_grad, max_iter = 1000L, tol = 1e-12
 #' @param tol Convergence tolerance: stop when max E_theta <= 1 + tol.
 #'   Default: 1e-4.
 #' @return List with:
-#'   - `atoms`: list of atom probability vectors (all on null boundary).
-#'   - `weights`: final mixture weights (sums to 1).
+#'   - `mixture`: a `mixture_mnom` with atoms on the null boundary and final weights.
 #'   - `atom_history`: list of per-iteration info (theta_stars, E_ratio, weights).
 #'   - `converged`: TRUE if the validity condition was met.
 #' @export
@@ -156,7 +158,7 @@ run_boundary_ripr <- function(
   reweight_maxit = 1000L,
   tol            = 1e-4
 ) {
-  K         <- length(q)
+  K         <- nrow(q@atoms)
   n_faces   <- K - 1L
   max_atoms <- atoms_per_face * n_faces
 
@@ -182,7 +184,7 @@ run_boundary_ripr <- function(
     matmul_0_ninf(X_mat_gpu, lt) + log_base_gpu$unsqueeze(2L)
   }
 
-  log_q_mass_gpu <- log_multinom_gpu(q)
+  log_q_mass_gpu <- log_pmf(q, X_mat_gpu)
   q_mass_gpu     <- log_q_mass_gpu$exp()
   finite_q_gpu   <- q_mass_gpu > 0
   q_mass_f_gpu   <- q_mass_gpu[finite_q_gpu]
@@ -297,8 +299,9 @@ run_boundary_ripr <- function(
     list(theta = null_boundary_face(j, alpha_star, K), E_ratio = -res$value)
   }
 
-  faces <- 2L:K
-  atoms <- lapply(faces, function(j) init_atom_face(j, q))
+  faces  <- 2L:K
+  q_mean <- as.vector(q@atoms %*% q@weights)
+  atoms  <- lapply(faces, function(j) init_atom_face(j, q_mean))
   for (th in atoms) add_atom_col(th)
 
   weights   <- reweight_mirror(rep(1 / n_faces, n_faces), kl_loss_and_grad,
@@ -335,9 +338,11 @@ run_boundary_ripr <- function(
   }
 
   list(
-    atoms        = atoms,
-    weights      = weights,
-    atom_history = history[!sapply(history, is.null)],
-    converged    = converged
+    mixture = mixture_mnom(
+      atoms = do.call(cbind, atoms),
+      weights = weights
+    ),
+    history = history[!sapply(history, is.null)],
+    converged = converged
   )
 }

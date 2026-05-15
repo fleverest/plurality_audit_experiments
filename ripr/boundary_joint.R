@@ -1,37 +1,24 @@
 box::use(
-  ripr / multinomial[build_counts_tensor]
+  ripr / multinomial[build_counts_tensor],
+  ripr / mixture[mixture_mnom, log_pmf]
 )
 
 #' KL divergence D(q ‖ P_w) for a discrete mixture P_w
 #'
 #' Computes the loss minimised by [run_boundary_ripr()]:
 #'   D(q ‖ P_w) = Σ_x q(x) log(q(x) / P_w(x))
-#' where P_w(x) = Σ_k weights[k] · Multinom(x; n, ws_list[[k]]).
 #'
 #' @param n Total number of trials per observation.
-#' @param q Numeric vector — the numerator distribution Q (length m).
-#' @param ws_list List of numeric vectors — mixture atom distributions (each length m).
-#' @param weights Numeric vector — mixture weights summing to 1 (length K).
+#' @param q A `mixture_mnom` — the numerator distribution Q.
+#' @param p_w A `mixture_mnom` — the null boundary mixture P_w.
 #' @return Scalar KL divergence.
 #' @export
-ripr_loss <- function(n, q, ws_list, weights) {
-  X_tensor <- build_counts_tensor(n, length(q))
-  X_mat    <- matrix(as.integer(as.array(X_tensor$cpu())), ncol = length(q))
-  log_base <- lgamma(n + 1) - rowSums(lgamma(X_mat + 1))
-
-  log_multinom <- function(theta) {
-    log_theta <- ifelse(theta > 0, log(theta), -Inf)
-    log_base + as.vector(X_mat %*% log_theta)
-  }
-
-  log_q_mass  <- log_multinom(q)
-  q_mass      <- exp(log_q_mass)
-  finite      <- is.finite(log_q_mass) & q_mass > 0
-
-  log_comps   <- do.call(cbind, lapply(ws_list, log_multinom))
-  log_comps_w <- sweep(log_comps, 2L, log(weights), "+")
-  row_max     <- apply(log_comps_w, 1L, max)
-  log_Pw      <- log(rowSums(exp(log_comps_w - row_max))) + row_max
+ripr_loss <- function(n, q, p_w) {
+  X_tensor   <- build_counts_tensor(n, nrow(q@atoms))
+  log_q_mass <- as.numeric(log_pmf(q, X_tensor)$cpu())
+  q_mass     <- exp(log_q_mass)
+  finite     <- is.finite(log_q_mass) & q_mass > 0
+  log_Pw     <- as.numeric(log_pmf(p_w, X_tensor, n)$cpu())
 
   sum(q_mass[finite] * (log_q_mass[finite] - log_Pw[finite]))
 }
@@ -39,35 +26,31 @@ ripr_loss <- function(n, q, ws_list, weights) {
 #' E_theta[Q(X)/P_w(X)] for each theta in a grid
 #'
 #' @param n Total number of trials per observation.
-#' @param q Numeric vector — the numerator distribution Q (length m).
-#' @param ws_list List of numeric vectors — mixture atom distributions (each length m).
-#' @param weights Numeric vector — mixture weights summing to 1 (length K).
+#' @param q A `mixture_mnom` — the numerator distribution Q.
+#' @param p_w A `mixture_mnom` — the null boundary mixture P_w.
 #' @param thetas List of numeric vectors — DGP grid (each length m).
 #' @return Numeric vector of length T: E_theta[Q(X)/P_w(X)] for each theta.
 #' @export
-ripr_expectations <- function(n, q, ws_list, weights, thetas) {
-  X_tensor <- build_counts_tensor(n, length(q))
-  X_mat    <- matrix(as.integer(as.array(X_tensor$cpu())), ncol = length(q))
+ripr_expectations <- function(n, q, p_w, thetas) {
+  m        <- nrow(q@atoms)
+  X_tensor <- build_counts_tensor(n, m)
+  X_mat    <- matrix(as.integer(as.array(X_tensor$cpu())), ncol = m)
   log_base <- lgamma(n + 1) - rowSums(lgamma(X_mat + 1))
 
   log_multinom <- function(theta) {
-    log_theta <- ifelse(theta > 0, log(theta), -Inf)
-    log_base + as.vector(X_mat %*% log_theta)
+    log_base + as.vector(X_mat %*% ifelse(theta > 0, log(theta), -Inf))
   }
 
-  log_q_mass  <- log_multinom(q)
-  log_comps   <- do.call(cbind, lapply(ws_list, log_multinom))
-  log_comps_w <- sweep(log_comps, 2L, log(weights), "+")
-  row_max     <- apply(log_comps_w, 1L, max)
-  log_Pw      <- log(rowSums(exp(log_comps_w - row_max))) + row_max
-  log_llr     <- log_q_mass - log_Pw
+  log_q_mass <- as.numeric(log_pmf(q, X_tensor)$cpu())
+  log_Pw     <- as.numeric(log_pmf(p_w, X_tensor, n)$cpu())
+  log_llr    <- log_q_mass - log_Pw
 
   vapply(thetas, function(theta) {
     log_terms <- log_multinom(theta) + log_llr
     finite    <- is.finite(log_terms)
     if (!any(finite)) return(0)
-    m <- max(log_terms[finite])
-    exp(m) * sum(exp(log_terms[finite] - m))
+    mv <- max(log_terms[finite])
+    exp(mv) * sum(exp(log_terms[finite] - mv))
   }, numeric(1L))
 }
 
@@ -96,11 +79,10 @@ null_boundary_3 <- function(s) {
 #' refined with `optim()`.
 #'
 #' @param n Total ballot count.
-#' @param q Numeric vector of length 3 — the numerator distribution Q.
+#' @param q A `mixture_mnom` of length 3 — the numerator distribution Q.
 #' @param grid Number of grid points per segment for the coarse search. Default: 50.
 #' @return List with:
-#'   - `ws_list`: list of two atom probability vectors.
-#'   - `weights`: numeric vector of length 2 summing to 1.
+#'   - `mixture`: a `mixture_mnom` with two atoms on the null boundary.
 #'   - `s1`, `s2`: boundary parameters of the two atoms.
 #'   - `max_E_ratio`: max_theta E_theta[Q/P_w] at the optimum.
 #' @export
@@ -115,7 +97,7 @@ optimise_two_atoms <- function(n, q, grid = 50L) {
     log_base + as.vector(X_mat %*% ifelse(theta > 0, log(theta), -Inf))
   }
 
-  log_q_mass <- log_multinom_all(q)
+  log_q_mass <- as.numeric(log_pmf(q, X_tensor)$cpu())
   q_mass     <- ifelse(is.finite(log_q_mass), exp(log_q_mass), 0)
   finite_q   <- q_mass > 0
 
@@ -190,8 +172,10 @@ optimise_two_atoms <- function(n, q, grid = 50L) {
   }, numeric(1L))
 
   list(
-    ws_list     = list(atom1, atom2),
-    weights     = c(w1, 1 - w1),
+    mixture     = mixture_mnom(
+      atoms   = cbind(atom1, atom2),
+      weights = c(w1, 1 - w1)
+    ),
     s1          = s1,
     s2          = s2,
     max_E_ratio = max(E_vals)

@@ -33,12 +33,13 @@ mixture_mnom <- new_class(
 #' Log PMF of a mixture_mnom for all multinomial outcomes of size n
 #'
 #' @param mixture A `mixture_mnom` object.
-#' @param X Tensor of shape (N, K), e.g. count vectors from [mnom_logpmf()].
-#' @param n Total number of trials.
+#' @param X Tensor of shape (N, K), e.g. count vectors from [build_counts_tensor()].
+#'   The multinomial parameter n is inferred as the sum of the first row of X.
 #' @return Tensor of shape (N,) with log Q(x) for each row x of X.
 log_pmf <- new_generic("log_pmf", "mixture")
 
-method(log_pmf, mixture_mnom) <- function(mixture, X, n) {
+method(log_pmf, mixture_mnom) <- function(mixture, X) {
+  n           <- X$sum(dim = 2L)[1]$item()
   log_atoms_t <- torch_tensor(log(mixture@atoms), device = device, dtype = dtype)
   log_wts     <- torch_tensor(log(mixture@weights), device = device, dtype = dtype)
   # (N, M) + (M,) broadcast → logsumexp over M → (N,)

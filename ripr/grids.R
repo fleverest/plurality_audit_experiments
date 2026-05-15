@@ -9,7 +9,7 @@
 #' @return Named list of length `points`, each element a numeric vector of
 #'   length 3 summing to 1.
 #' @export
-make_simplex_grid <- function(points = 21) {
+make_2d_simplex_grid <- function(points = 21) {
   if (!is.numeric(points) || length(points) != 1 || points < 3L) {
     stop("`points` must be a single numeric >= 3")
   }
@@ -23,4 +23,16 @@ make_simplex_grid <- function(points = 21) {
     lapply(seq1, function(t) c(t, t, 1 - 2 * t)),
     lapply(seq2_tail, function(t) c(t, 1 - 2 * t, t))
   )
+}
+
+#' Grid of integer vectors on the simplex
+#' 
+#' Generates all non-negative integer vectors of length `d` that sum to `n`.
+#' The result is a matrix where each row is such a vector. This can be used to
+#' construct a lattice grid over the standard (d-1)-simplex by normalising the
+#' rows to sum to 1.
+#' @export
+simplex_lattice <- function(d, n) {
+  if (d == 1L) return(matrix(n, nrow = 1L, ncol = 1L))
+  do.call(rbind, lapply(0L:n, function(k) cbind(k, simplex_lattice(d - 1L, n - k))))
 }

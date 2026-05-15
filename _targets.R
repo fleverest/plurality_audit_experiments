@@ -2,19 +2,16 @@ library(targets)
 library(crew.cluster)
 
 box::use(
-  ripr /
-    plots[
-      plot_results_weights,
-      plot_results_loss_history,
-      plot_results_expectation_profile
-    ],
-  ripr / grids[make_simplex_grid],
-  ripr / experiment_fns[run_ripr_target]
+  ripr / mixture[point_mnom, dirichlet_mnom],
+  ripr / grids[simplex_lattice],
+  ripr / ripr_colgen_boundary[run_boundary_ripr]
 )
 
-gpu_controller <- crew_controller_slurm(
+# Second IP address is reachable from other compute nodes on M3
+is_m3 <- grepl("m3", Sys.info()[["nodename"]])
+gpu_controller <- if (!is_m3) NULL else crew_controller_slurm(
   name = "gpu",
-  host = nanonext::ip_addr()[2L], # Second IP address is reachable from other compute nodes on M3
+  host = nanonext::ip_addr()[2L],
   workers = 2L, # QOSMaxGRESPerUser is 2 for me
   options_cluster = crew_options_slurm(
     partition = "gpu",
@@ -29,48 +26,37 @@ gpu_controller <- crew_controller_slurm(
 )
 
 tar_option_set(
-  seed = 20251111,
-  controller = gpu_controller
+  seed = 20260516L,
+  controller = if (is_m3) gpu_controller else NULL
 )
 
-n_config <- data.frame(
-  n = c(1L:5L, 10L, 20L, 50L, 100L),
-  n_restarts = c(rep(200L, 5), rep(100L, 3), 25L) # Fewer resarts for large n
-)
+
+# Define the alternatives of interest.
+simplex_k3_alt <- simplex_lattice(3, 50L) / 50L
+simplex_k3_alt <- t(simplex_k3_alt[simplex_k3_alt[, 1L] > simplex_k3_alt[, 2L] & simplex_k3_alt[, 1L] > simplex_k3_alt[, 3L], ])
+simplex_k4_alt <- simplex_lattice(4, 25L) / 25L
+simplex_k4_alt <- t(simplex_k4_alt[simplex_k4_alt[, 1L] > simplex_k4_alt[, 2L] & simplex_k4_alt[, 1L] > simplex_k4_alt[, 3L] & simplex_k4_alt[, 1L] > simplex_k4_alt[, 4L], ])
 
 list(
-  # Lightweight targets run locally in the orchestrator process
-  tar_target(q, c(7 / 16, 5 / 16, 4 / 16), deployment = "main"),
-  tar_target(thetas, make_simplex_grid(1001), deployment = "main"),
-  tar_target(ws, make_simplex_grid(501), deployment = "main"),
-
-  tarchetypes::tar_map(
-    values = n_config,
-    names = "n",
-    # result targets are dispatched to SLURM GPU jobs
-    tar_target(result, {
-      box::use(ripr / experiment_fns[run_ripr_target])
-      run_ripr_target(n, n_restarts, thetas, q, ws)
-    }),
-    # plot/analysis targets are cheap — run in the orchestrator
-    tar_target(
-      plot_weights,
-      plot_results_weights(result$weights, result$final_loss, top = 50),
-      deployment = "main"
+  tar_target(
+    alternative,
+    list(
+      point_754 = point_mnom(q = c(7 / 16, 5 / 16, 4 / 16)),
+      point_844 = point_mnom(q = c(8 / 16, 4 / 16, 4 / 16)),
+      dirichlet_754 = dirichlet_mnom(alpha = c(7, 5, 4), atoms = simplex_k3_alt),
+      dirichlet_844 = dirichlet_mnom(alpha = c(8, 4, 4), atoms = simplex_k3_alt),
+      point_7531 = point_mnom(q = c(7 / 16, 5 / 16, 3 / 16, 1 / 16)),
+      point_8222 = point_mnom(q = c(8 / 16, 2 / 16, 2 / 16, 2 / 16)),
+      dirichlet_7531 = dirichlet_mnom(alpha = c(7, 5, 3, 1), atoms = simplex_k4_alt),
+      dirichlet_8222 = dirichlet_mnom(alpha = c(8, 2, 2, 2), atoms = simplex_k4_alt)
     ),
-    tar_target(
-      plot_loss_history,
-      plot_results_loss_history(log(1 - result$loss_history)),
-      deployment = "main"
-    ),
-    tar_target(
-      plot_expectation_profile,
-      plot_results_expectation_profile(
-        result$expectation_profile,
-        result$final_loss,
-        top = 50
-      ),
-      deployment = "main"
-    )
+    iteration = "list"
+  ),
+  tar_target(ns, seq_len(50L)),
+  tar_target(
+    ripr_boundary,
+    run_boundary_ripr(n = ns, q = alternative),
+    pattern   = cross(alternative, ns),
+    iteration = "list"
   )
 )

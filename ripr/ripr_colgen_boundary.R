@@ -2,12 +2,14 @@ box::use(
   torch[
     torch_tensor,
     torch_full,
-    torch_logsumexp
+    torch_logsumexp,
+    torch_lgamma
   ],
   ripr / torch_settings[device, dtype],
   ripr / tensor_ops[matmul_0_ninf, add_ninf_any_],
   ripr / multinomial[build_counts_tensor],
-  ripr / mixture[mixture_mnom, log_pmf]
+  ripr / mixture[mixture_mnom, log_pmf],
+  ripr / grids[simplex_lattice]
 )
 
 # Initial atom on face j: project q onto face j by projection along the line from q to e_j.
@@ -16,13 +18,6 @@ init_atom_face <- function(j, q) {
   theta     <- (1 - lambda) * q
   theta[j]  <- theta[j] + lambda
   theta
-}
-
-# All non-negative integer vectors of length d summing to n (rows of result sum to n).
-# Used to build a lattice grid over the standard (d-1)-simplex.
-simplex_lattice <- function(d, n) {
-  if (d == 1L) return(matrix(n, nrow = 1L, ncol = 1L))
-  do.call(rbind, lapply(0L:n, function(k) cbind(k, simplex_lattice(d - 1L, n - k))))
 }
 
 # Point on null-boundary face j for K-candidate plurality audit.
@@ -147,7 +142,7 @@ reweight_mirror <- function(w_init, loss_and_grad, max_iter = 1000L, tol = 1e-12
 #'   Default: 1e-4.
 #' @return List with:
 #'   - `mixture`: a `mixture_mnom` with atoms on the null boundary and final weights.
-#'   - `atom_history`: list of per-iteration info (theta_stars, E_ratio, weights).
+#'   - `history`: list of per-iteration info (theta_stars, E_ratio, weights).
 #'   - `converged`: TRUE if the validity condition was met.
 #' @export
 run_boundary_ripr <- function(
@@ -156,7 +151,8 @@ run_boundary_ripr <- function(
   atoms_per_face = 50L,
   oracle_grid    = 200L,
   reweight_maxit = 1000L,
-  tol            = 1e-4
+  tol            = 1e-4,
+  verbose        = TRUE
 ) {
   K         <- nrow(q@atoms)
   n_faces   <- K - 1L
@@ -164,23 +160,20 @@ run_boundary_ripr <- function(
 
   X_tensor  <- build_counts_tensor(n, K)
   X_mat_gpu <- X_tensor$to(device = device, dtype = dtype)
-  X_mat_r   <- matrix(as.integer(as.array(X_tensor$cpu())), ncol = K)
   M         <- X_mat_gpu$size(1L)
 
-  log_base_gpu <- torch_tensor(
-    lgamma(n + 1) - rowSums(lgamma(X_mat_r + 1)),
-    device = device, dtype = dtype
-  )
+  log_base_gpu <- torch_lgamma(torch_tensor(n + 1L, device = device, dtype = dtype)) -
+    torch_lgamma(X_mat_gpu + 1)$sum(dim = 2L) # (M,)
 
   # Single-theta log-PMF: R K-vector → (M,) GPU tensor.
   log_multinom_gpu <- function(theta) {
-    lt <- torch_tensor(ifelse(theta > 0, log(theta), -Inf), device = device, dtype = dtype)
-    matmul_0_ninf(X_mat_gpu, lt$unsqueeze(2L))$squeeze(2L) + log_base_gpu
+    lt <- torch_tensor(log(theta), device = device, dtype = dtype)
+    matmul_0_ninf(X_mat_gpu, lt) + log_base_gpu
   }
 
   # Batched log-PMF: (K, N) R matrix → (M, N) GPU tensor.
   log_multinom_batch_gpu <- function(theta_mat) {
-    lt <- torch_tensor(ifelse(theta_mat > 0, log(theta_mat), -Inf), device = device, dtype = dtype)
+    lt <- torch_tensor(log(theta_mat), device = device, dtype = dtype)
     matmul_0_ninf(X_mat_gpu, lt) + log_base_gpu$unsqueeze(2L)
   }
 
@@ -299,6 +292,11 @@ run_boundary_ripr <- function(
     list(theta = null_boundary_face(j, alpha_star, K), E_ratio = -res$value)
   }
 
+  if (verbose) message(sprintf(
+    "run_boundary_ripr: n=%d, K=%d, M=%d outcomes, %d atoms/face, %d faces, tol=%g",
+    n, K, M, atoms_per_face, n_faces, tol
+  ))
+
   faces  <- 2L:K
   q_mean <- as.vector(q@atoms %*% q@weights)
   atoms  <- lapply(faces, function(j) init_atom_face(j, q_mean))
@@ -314,7 +312,7 @@ run_boundary_ripr <- function(
     face_results <- lapply(faces, function(j) find_best_on_face(j, log_Pw_gpu))
     E_star       <- max(vapply(face_results, `[[`, "E_ratio", FUN.VALUE = numeric(1L)))
 
-    message(sprintf("Atom %d/%d: max_E_ratio - 1 = %e", atom_idx, atoms_per_face, E_star - 1))
+    if (verbose) message(sprintf("Atom %d/%d: max_E_ratio - 1 = %e", atom_idx, atoms_per_face, E_star - 1))
 
     history[[atom_idx]] <- list(
       theta_stars = lapply(face_results, `[[`, "theta"),
@@ -323,7 +321,7 @@ run_boundary_ripr <- function(
     )
 
     if (E_star <= 1 + tol) {
-      message(sprintf("Converged after %d atoms (max_E_ratio - 1 = %e).", n_live, E_star - 1))
+      if (verbose) message(sprintf("Converged after %d atoms (max_E_ratio - 1 = %e).", n_live, E_star - 1))
       converged <- TRUE
       break
     }

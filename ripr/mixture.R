@@ -1,5 +1,5 @@
 box::use(
-  S7[new_class, new_generic, new_property, method, class_numeric, class_integer],
+  S7[new_class, new_generic, new_property, method, class_numeric, class_integer, `method<-`],
   torch[torch_tensor, torch_logsumexp],
   ripr / torch_settings[device, dtype],
   ripr / multinomial[mnom_logpmf]
@@ -15,6 +15,7 @@ box::use(
 #' @slot weights Numeric vector of length M summing to 1.
 #' @slot n Integer — the multinomial sample size this mixture is designed for,
 #'   or NULL if not tied to a specific sample size.
+#' @export
 mixture_mnom <- new_class(
   "mixture_mnom",
   properties = list(
@@ -43,6 +44,7 @@ mixture_mnom <- new_class(
 #' @param warn If TRUE (default), warn when `mixture@n` is set and does not match
 #'   the n inferred from X.
 #' @return Tensor of shape (N,) with log Q(x) for each row x of X.
+#' @export
 log_pmf <- new_generic("log_pmf", "mixture")
 
 method(log_pmf, mixture_mnom) <- function(mixture, X, warn = TRUE) {
@@ -78,8 +80,11 @@ point_mnom <- function(q) {
 dirichlet_mnom <- function(alpha, atoms) {
   # log Dir(alpha)(theta) up to the shared normalising constant
   log_unnorm <- colSums((alpha - 1) * log(atoms))
-  log_unnorm[!is.finite(log_unnorm)] <- -Inf
+  # atoms with zero density under the Dirichlet get -Inf log weight, i.e. zero weight,
+  # so we just prune them to save computation and avoid downstream issues from log(0)
+  atoms <- atoms[, is.finite(log_unnorm), drop = FALSE]
+  log_unnorm <- log_unnorm[is.finite(log_unnorm)]
   # normalise in log space for numerical stability
-  log_weights <- log_unnorm - log(sum(exp(log_unnorm - max(log_unnorm[is.finite(log_unnorm)]))))
+  log_weights <- log_unnorm - log(sum(exp(log_unnorm)))
   mixture_mnom(atoms = atoms, weights = exp(log_weights))
 }

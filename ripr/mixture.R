@@ -1,5 +1,13 @@
 box::use(
-  S7[new_class, new_generic, new_property, method, class_numeric, class_integer, `method<-`],
+  S7[
+    new_class,
+    new_generic,
+    new_property,
+    method,
+    class_numeric,
+    class_integer,
+    `method<-`
+  ],
   torch[torch_tensor, torch_logsumexp],
   ripr / torch_settings[device, dtype],
   ripr / multinomial[mnom_logpmf]
@@ -19,19 +27,26 @@ box::use(
 mixture_mnom <- new_class(
   "mixture_mnom",
   properties = list(
-    atoms   = class_numeric,
+    atoms = class_numeric,
     weights = class_numeric,
-    n       = new_property(default = NULL)
+    n = new_property(default = NULL)
   ),
   validator = function(self) {
-    if (!is.matrix(self@atoms))
+    if (!is.matrix(self@atoms)) {
       return("`atoms` must be a matrix")
-    if (ncol(self@atoms) != length(self@weights))
+    }
+    if (ncol(self@atoms) != length(self@weights)) {
       return("`weights` must have one entry per column of `atoms`")
-    if (abs(sum(self@weights) - 1) > 1e-9)
+    }
+    if (abs(sum(self@weights) - 1) > 1e-9) {
       return("`weights` must sum to 1")
-    if (!is.null(self@n) && (!is.numeric(self@n) || length(self@n) != 1L || self@n < 1))
+    }
+    if (
+      !is.null(self@n) &&
+        (!is.numeric(self@n) || length(self@n) != 1L || self@n < 1)
+    ) {
       return("`n` must be a positive scalar or NULL")
+    }
     NULL
   }
 )
@@ -49,10 +64,19 @@ log_pmf <- new_generic("log_pmf", "mixture")
 
 method(log_pmf, mixture_mnom) <- function(mixture, X, warn = TRUE) {
   n <- X[1, ]$sum()$item()
-  if (warn && !is.null(mixture@n) && mixture@n != n)
-    warning(sprintf("mixture@n (%d) does not match n inferred from X (%d)", mixture@n, n))
-  log_atoms_t <- torch_tensor(log(mixture@atoms), device = device, dtype = dtype)
-  log_wts     <- torch_tensor(log(mixture@weights), device = device, dtype = dtype)
+  if (warn && !is.null(mixture@n) && mixture@n != n) {
+    warning(sprintf(
+      "mixture@n (%d) does not match n inferred from X (%d)",
+      mixture@n,
+      n
+    ))
+  }
+  log_atoms_t <- torch_tensor(
+    log(mixture@atoms),
+    device = device,
+    dtype = dtype
+  )
+  log_wts <- torch_tensor(log(mixture@weights), device = device, dtype = dtype)
   # (N, M) + (M,) broadcast → logsumexp over M → (N,)
   torch_logsumexp(mnom_logpmf(X, log_atoms_t, n) + log_wts, dim = 2L)
 }

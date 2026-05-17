@@ -1,5 +1,11 @@
 box::use(
-  torch[torch_isneginf, torch_where, torch_zeros_like, torch_matmul, torch_amax],
+  torch[
+    torch_isneginf,
+    torch_where,
+    torch_zeros_like,
+    torch_matmul,
+    torch_amax
+  ],
   ripr / torch_settings[dtype]
 )
 

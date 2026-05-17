@@ -41,22 +41,24 @@ list(
   tar_target(
     alternative,
     list(
-      point_754 = point_mnom(q = c(7 / 16, 5 / 16, 4 / 16)),
-      point_844 = point_mnom(q = c(8 / 16, 4 / 16, 4 / 16)),
-      dirichlet_754 = dirichlet_mnom(alpha = c(7, 5, 4), atoms = simplex_k3_alt),
-      dirichlet_844 = dirichlet_mnom(alpha = c(8, 4, 4), atoms = simplex_k3_alt),
-      point_7531 = point_mnom(q = c(7 / 16, 5 / 16, 3 / 16, 1 / 16)),
-      point_8222 = point_mnom(q = c(8 / 16, 2 / 16, 2 / 16, 2 / 16)),
-      dirichlet_7531 = dirichlet_mnom(alpha = c(7, 5, 3, 1), atoms = simplex_k4_alt),
-      dirichlet_8222 = dirichlet_mnom(alpha = c(8, 2, 2, 2), atoms = simplex_k4_alt)
-    ),
-    iteration = "list"
+      list(name = "point_754", Q = point_mnom(q = c(7 / 16, 5 / 16, 4 / 16))),
+      list(name = "point_844", Q = point_mnom(q = c(8 / 16, 4 / 16, 4 / 16))),
+      list(name = "dirichlet_754", Q = dirichlet_mnom(alpha = c(7, 5, 4), atoms = simplex_k3_alt)),
+      list(name = "dirichlet_844", Q = dirichlet_mnom(alpha = c(8, 4, 4), atoms = simplex_k3_alt)),
+      list(name = "point_7531", Q = point_mnom(q = c(7 / 16, 5 / 16, 3 / 16, 1 / 16))),
+      list(name = "point_8222", Q = point_mnom(q = c(8 / 16, 2 / 16, 2 / 16, 2 / 16))),
+      list(name = "dirichlet_7531", Q = dirichlet_mnom(alpha = c(7, 5, 3, 1), atoms = simplex_k4_alt)),
+      list(name = "dirichlet_8222", Q = dirichlet_mnom(alpha = c(8, 2, 2, 2), atoms = simplex_k4_alt))
+    )
   ),
-  tar_target(ns, seq_len(50L)),
+  tar_target(n, as.list(seq_len(50L))),
   tar_target(
     ripr_boundary,
-    run_boundary_ripr(n = ns, q = alternative),
-    pattern   = cross(alternative, ns),
+    c(
+      list(alt_name = alternative[[1L]]$name, n = n[[1L]]),
+      run_boundary_ripr(n = n[[1L]], q = alternative[[1L]]$Q, atoms_per_face = 200L)
+    ),
+    pattern   = cross(alternative, n),
     iteration = "list"
   )
 )

@@ -20,52 +20,28 @@ init_atom_face <- function(j, q) {
   theta
 }
 
-# Point on null-boundary face j for K-candidate plurality audit.
-# alpha: length-(K-1) vector in the standard (K-2)-simplex (sums to 1, all >= 0).
-#
-# Face j is the set where theta_1 = theta_j >= all others. Its K-1 vertices are:
-#   v_0          : pure-pair  (1/2 at pos 1, 1/2 at pos j, 0 elsewhere)
-#   v_r (r>=1)   : triple     (1/3 at pos 1, 1/3 at pos j, 1/3 at pos others[r])
-# where others = sort({2,...,K} \ {j}).
-#
-# theta_1 = theta_j = alpha[1]/6 + 1/3,  theta[others[r]] = alpha[r+1]/3.
-null_boundary_face <- function(j, alpha, K) {
+# Enumerate vertices of face j: for each non-empty subset S of {2,...,K}\{j},
+# the vertex has theta_1 = theta_j = theta_k = 1/(|S|+2) for k in S, others 0.
+# Plus the pure-pair vertex (S = empty): theta_1 = theta_j = 1/2.
+face_vertices <- function(j, K) {
   others <- setdiff(seq_len(K)[-1L], j)
-  theta <- numeric(K)
-  theta[1L] <- alpha[1L] / 6 + 1 / 3
-  theta[j] <- theta[1L]
-  for (r in seq_along(others)) {
-    theta[others[r]] <- alpha[r + 1L] / 3
-  }
-  theta
-}
-
-# Vectorised null_boundary_face over all rows of alpha_mat.
-# alpha_mat: (N, K-1); returns (K, N) matrix of theta vectors.
-compute_face_thetas <- function(j, alpha_mat, K) {
-  others <- setdiff(seq_len(K)[-1L], j)
-  N <- nrow(alpha_mat)
-  theta_mat <- matrix(0, K, N)
-  theta_mat[1L, ] <- alpha_mat[, 1L] / 6 + 1 / 3
-  theta_mat[j, ] <- theta_mat[1L, ]
-  for (r in seq_along(others)) {
-    theta_mat[others[r], ] <- alpha_mat[, r + 1L] / 3
-  }
-  theta_mat
-}
-
-# Jacobian of null_boundary_face(j, alpha, K) w.r.t. alpha.
-# theta[1] = theta[j] = alpha[1]/6 + 1/3,  theta[others[r]] = alpha[r+1]/3.
-# d theta / d alpha is a K x (K-1) matrix.
-face_jacobian <- function(K, j) {
-  others <- setdiff(seq_len(K), c(1L, j))
-  J <- matrix(0, K, K - 1L)
-  J[1L, 1L] <- 1 / 6
-  J[j, 1L] <- 1 / 6
-  for (r in seq_along(others)) {
-    J[others[r], r + 1L] <- 1 / 3
-  }
-  J
+  n_others <- length(others)
+  # All 2^n_others subsets of others
+  subsets <- lapply(0L:(2L^n_others - 1L), function(mask) {
+    others[as.logical(intToBits(mask)[seq_len(n_others)])]
+  })
+  vertices <- lapply(subsets, function(S) {
+    v <- numeric(K)
+    s_size <- length(S)
+    val <- 1 / (s_size + 2L)
+    v[1L] <- val
+    v[j] <- val
+    for (k in S) {
+      v[k] <- val
+    }
+    v
+  })
+  do.call(cbind, vertices) # K x 2^(K-2) matrix
 }
 
 # Softmax reparametrisation: maps v ∈ R^{d-1} to α ∈ Δ^{d-1} via softmax(c(0, v)).
@@ -99,6 +75,7 @@ logsumexp_inplace_ <- function(buf, dim) {
   buf$sub_(safe_mx)$exp_()
   buf$sum(dim = dim)$log_()$add_(safe_mx$squeeze(dim))
 }
+
 
 # Mirror descent (multiplicative weights) on the probability simplex.
 # loss_and_grad: function(w) returning list(loss, grad) at the current weights.
@@ -159,11 +136,14 @@ reweight_mirror <- function(
 #'   Default: 200.
 #' @param reweight_maxit Max mirror descent iterations for the reweighting step.
 #'   Default: 1000.
+#' @param n_em_iter Maximum EM refinement iterations after each Frank-Wolfe step.
+#'   EM stops early when the KL decrease per iteration drops below `tol`.
+#'   Set to 0 to disable EM. Default: 3.
 #' @param tol Convergence tolerance: stop when max E_theta <= 1 + tol.
 #'   Default: 1e-4.
 #' @return List with:
 #'   - `mixture`: a `mixture_mnom` with atoms on the null boundary and final weights.
-#'   - `history`: list of per-iteration info (theta_stars, E_ratio, weights).
+#'   - `history`: list of per-iteration info (theta_stars, E_ratio, KL-divergence).
 #'   - `converged`: TRUE if the validity condition was met.
 #' @export
 run_boundary_ripr <- function(
@@ -172,12 +152,30 @@ run_boundary_ripr <- function(
   atoms_per_face = 50L,
   oracle_grid = 200L,
   reweight_maxit = 1000L,
+  n_em_iter = 3L,
   tol = 1e-4,
   verbose = TRUE
 ) {
   K <- nrow(q@atoms)
   n_faces <- K - 1L
   max_atoms <- atoms_per_face * n_faces
+
+  # Precompute vertices for every face once
+  face_vertices_cache <- lapply(2L:K, function(j) face_vertices(j, K))
+  names(face_vertices_cache) <- as.character(2L:K)
+
+  # Helper accessors
+  get_vertices <- function(j) face_vertices_cache[[as.character(j)]]
+
+  null_boundary_face <- function(j, alpha) {
+    as.vector(get_vertices(j) %*% alpha)
+  }
+
+  compute_face_thetas <- function(j, alpha_mat) {
+    get_vertices(j) %*% t(alpha_mat)
+  }
+
+  face_jacobian <- function(j) get_vertices(j)
 
   X_tensor <- build_counts_tensor(n, K)
   X_mat_gpu <- X_tensor$to(device = device, dtype = dtype)
@@ -220,15 +218,19 @@ run_boundary_ripr <- function(
   lc_f_ninf <- lc_f$isneginf() # (M_f, max_atoms) bool, all TRUE initially
   n_live <- 0L
 
+  write_atom_col <- function(k, theta) {
+    lm <- log_multinom_gpu(theta)
+    lc[, k] <<- lm
+    lc_ninf[, k] <<- lm$isneginf()
+    lm_f <- lm[finite_q_gpu]
+    lc_f[, k] <<- lm_f
+    lc_f_ninf[, k] <<- lm_f$isneginf()
+  }
+
   # Append one atom in-place: fills the next column of lc/lc_f and their ninf masks.
   add_atom_col <- function(theta) {
-    lm <- log_multinom_gpu(theta)
     n_live <<- n_live + 1L
-    lc[, n_live] <- lm
-    lc_ninf[, n_live] <- lm$isneginf()
-    lm_f <- lm[finite_q_gpu]
-    lc_f[, n_live] <- lm_f
-    lc_f_ninf[, n_live] <- lm_f$isneginf()
+    write_atom_col(n_live, theta)
   }
 
   # log P_w(x) for all outcomes. Uses buf_MA as scratch — caller must not read buf_MA after.
@@ -290,33 +292,18 @@ run_boundary_ripr <- function(
     )
   }
 
-  # Oracle for face j with analytic gradient via chain rule through
-  # null_boundary_face and the softmax reparametrisation.
-  find_best_on_face <- function(j, log_Pw_gpu) {
-    J <- face_jacobian(K, j)
+  # Run a coarse grid search, and refine with BFGS on a convex polytope.
+  # obj_and_grad: function(v) returning list(value, gradient) where value is the objective function to be minimised.
+  # obj_grid_eval: function(alpha_mat) returning numeric vector of negative objectives over grid rows.
+  # Returns list(alpha_star, neg_value).
+  optimise_on_face <- function(j, obj_and_grad, obj_grid_eval) {
+    J <- face_jacobian(j)
+    n_vertices <- ncol(J)
+    lat_density <- max(3L, round(oracle_grid^(1 / max(1L, n_vertices - 1L))))
+    alpha_mat <- simplex_lattice(n_vertices, lat_density) / lat_density
 
-    obj_and_grad <- function(v) {
-      alpha <- alpha_from_v(v)
-      theta <- null_boundary_face(j, alpha, K)
-      log_tm <- log_multinom_gpu(theta)
-      E <- compute_E_ratio(log_tm, log_Pw_gpu)
-      grad_theta <- compute_E_ratio_grad_theta(log_tm, log_Pw_gpu, theta)
-      grad_v <- as.vector(grad_theta %*% J %*% softmax_jacobian(alpha))
-      list(value = -E, gradient = -grad_v)
-    }
-
-    lat_density <- max(3L, round(oracle_grid^(1 / max(1L, K - 2L))))
-    alpha_mat <- simplex_lattice(K - 1L, lat_density) / lat_density
-
-    # Batch-evaluate E_ratio for all grid points in one GPU call.
-    log_tm_batch <- log_multinom_batch_gpu(compute_face_thetas(j, alpha_mat, K))
-    log_terms <- (log_tm_batch +
-      log_q_mass_gpu$unsqueeze(2L) -
-      log_Pw_gpu$unsqueeze(2L))$nan_to_num(nan = -Inf)
-    E_grid <- as.numeric(torch_logsumexp(log_terms, dim = 1L)$exp()$cpu())
-    rm(log_tm_batch, log_terms)
-
-    best_alpha <- pmax(alpha_mat[which.max(E_grid), ], 1e-8)
+    neg_obj_grid <- obj_grid_eval(alpha_mat)
+    best_alpha <- pmax(alpha_mat[which.max(neg_obj_grid), ], 1e-8)
     best_alpha <- best_alpha / sum(best_alpha)
 
     res <- tryCatch(
@@ -327,12 +314,135 @@ run_boundary_ripr <- function(
         method = "BFGS"
       ),
       error = function(e) {
-        list(par = v_from_alpha(best_alpha), value = -max(E_grid, na.rm = TRUE))
+        list(
+          par = v_from_alpha(best_alpha),
+          value = -max(neg_obj_grid, na.rm = TRUE)
+        )
       }
     )
 
-    alpha_star <- alpha_from_v(res$par)
-    list(theta = null_boundary_face(j, alpha_star, K), E_ratio = -res$value)
+    list(alpha_star = alpha_from_v(res$par), neg_value = res$value)
+  }
+
+  # Oracle for face j with analytic gradient via chain rule through
+  # null_boundary_face and the softmax reparametrisation.
+  find_best_on_face <- function(j, log_Pw_gpu) {
+    J <- face_jacobian(j)
+
+    obj_and_grad <- function(v) {
+      alpha <- alpha_from_v(v)
+      theta <- null_boundary_face(j, alpha)
+      log_tm <- log_multinom_gpu(theta)
+      E <- compute_E_ratio(log_tm, log_Pw_gpu)
+      grad_theta <- compute_E_ratio_grad_theta(log_tm, log_Pw_gpu, theta)
+      grad_v <- as.vector(grad_theta %*% J %*% softmax_jacobian(alpha))
+      list(value = -E, gradient = -grad_v)
+    }
+
+    obj_grid_eval <- function(alpha_mat) {
+      log_tm_batch <- log_multinom_batch_gpu(compute_face_thetas(j, alpha_mat))
+      log_terms <- (log_tm_batch +
+        log_q_mass_gpu$unsqueeze(2L) -
+        log_Pw_gpu$unsqueeze(2L))$nan_to_num(nan = -Inf)
+      as.numeric(torch_logsumexp(log_terms, dim = 1L)$exp()$cpu())
+    }
+
+    res <- optimise_on_face(j, obj_and_grad, obj_grid_eval)
+    list(
+      theta = null_boundary_face(j, res$alpha_star),
+      E_ratio = -res$neg_value,
+      face = j
+    )
+  }
+
+  # Weighted M-step location update: maximise sum_x q(x) r_k(x) log p_theta(x)
+  # over theta on face j.  This is the EM M-step, NOT a weighted Frank-Wolfe oracle.
+  find_best_on_face_weighted <- function(j, log_r_k) {
+    J <- face_jacobian(j)
+    log_weights <- log_q_mass_gpu + log_r_k
+    weights_x <- log_weights$exp()$nan_to_num(nan = 0.0) # (M,)
+
+    obj_and_grad <- function(v) {
+      alpha <- alpha_from_v(v)
+      theta <- null_boundary_face(j, alpha)
+      log_tm <- log_multinom_gpu(theta)
+      obj_val <- (weights_x * log_tm)$nan_to_num(nan = 0.0)$sum()$item()
+      theta_gpu <- torch_tensor(theta, device = device, dtype = dtype)
+      score_gpu <- X_mat_gpu / theta_gpu$unsqueeze(1L)
+      grad_theta <- as.numeric(
+        (weights_x$unsqueeze(2L) * score_gpu)$nan_to_num(nan = 0.0)$sum(
+          dim = 1L
+        )$cpu()
+      )
+      grad_v <- as.vector(grad_theta %*% J %*% softmax_jacobian(alpha))
+      list(value = -obj_val, gradient = -grad_v)
+    }
+
+    obj_grid_eval <- function(alpha_mat) {
+      log_tm_batch <- log_multinom_batch_gpu(compute_face_thetas(j, alpha_mat))
+      as.numeric(
+        (weights_x$unsqueeze(2L) * log_tm_batch)$nan_to_num(nan = 0.0)$sum(
+          dim = 1L
+        )$cpu()
+      )
+    }
+
+    res <- optimise_on_face(j, obj_and_grad, obj_grid_eval)
+    list(theta = null_boundary_face(j, res$alpha_star))
+  }
+
+  # E-step: log-responsibilities log r_k(x) = log w_k + log p_{theta_k}(x) - log P_w(x).
+  # Returns (M, n_live) tensor of normalised log-responsibilities.
+  compute_responsibilities <- function(log_Pw_gpu, weights) {
+    w_log <- torch_tensor(
+      log(pmax(weights, 1e-300)),
+      device = device,
+      dtype = dtype
+    )
+    lc_live <- lc$narrow(2L, 1L, n_live)
+    log_r <- lc_live + w_log$unsqueeze(1L) - log_Pw_gpu$unsqueeze(2L)
+    log_r$nan_to_num_(nan = -Inf)
+    log_r - torch_logsumexp(log_r, dim = 2L, keepdim = TRUE)
+  }
+
+  frank_wolfe_oracle <- function(weights) {
+    log_Pw_gpu <- compute_log_Pw_gpu(weights)
+    face_results <- lapply(faces, function(j) find_best_on_face(j, log_Pw_gpu))
+    list(
+      face_results = face_results,
+      E_star = max(vapply(
+        face_results,
+        `[[`,
+        "E_ratio",
+        FUN.VALUE = numeric(1L)
+      ))
+    )
+  }
+
+  run_em_step <- function(weights, n_em_iter, kl_init) {
+    kl <- kl_init
+    for (em_idx in seq_len(n_em_iter)) {
+      log_Pw_gpu <- compute_log_Pw_gpu(weights)
+      log_r <- compute_responsibilities(log_Pw_gpu, weights)
+
+      new_weights <- (log_r$exp() * q_mass_gpu$unsqueeze(2L))$sum(dim = 1L)
+      new_weights <- pmax(as.numeric(new_weights$cpu()), 1e-300)
+      new_weights <- new_weights / sum(new_weights)
+
+      for (k in seq_len(n_live)) {
+        result <- find_best_on_face_weighted(atom_faces[[k]], log_r[, k])
+        write_atom_col(k, result$theta)
+        atoms[[k]] <<- result$theta
+      }
+
+      weights <- new_weights
+      kl_new <- kl_loss_and_grad(weights)$loss
+      if (kl - kl_new < tol) {
+        break
+      }
+      kl <- kl_new
+    }
+    list(weights = weights, kl = kl)
   }
 
   if (verbose) {
@@ -348,70 +458,90 @@ run_boundary_ripr <- function(
   }
 
   faces <- 2L:K
-  q_mean <- as.vector(q@atoms %*% q@weights)
-  atoms <- lapply(faces, function(j) init_atom_face(j, q_mean))
+  # Initialise by projecting the mode of q onto each face.
+  q_max <- q@atoms[, which.max(q@weights)]
+  atoms <- lapply(faces, function(j) init_atom_face(j, q_max))
+  atom_faces <- as.list(faces)
   for (th in atoms) {
     add_atom_col(th)
   }
 
-  weights <- reweight_mirror(
-    rep(1 / n_faces, n_faces),
-    kl_loss_and_grad,
-    max_iter = reweight_maxit
-  )
+  weights <- rep(1 / n_faces, n_faces)
   converged <- FALSE
   history <- vector("list", atoms_per_face)
+  kl_prev <- NULL
 
-  for (atom_idx in seq_len(atoms_per_face - 1L)) {
-    log_Pw_gpu <- compute_log_Pw_gpu(weights)
-    face_results <- lapply(faces, function(j) find_best_on_face(j, log_Pw_gpu))
-    E_star <- max(vapply(
-      face_results,
-      `[[`,
-      "E_ratio",
-      FUN.VALUE = numeric(1L)
-    ))
+  for (atom_idx in seq_len(atoms_per_face)) {
+    # Frank-Wolfe step: add new approximate best atom, then reweight all atoms via mirror descent to minimise KL.
+    weights <- reweight_mirror(
+      weights,
+      kl_loss_and_grad,
+      max_iter = reweight_maxit
+    )
+    em_result <- run_em_step(weights, n_em_iter, kl_loss_and_grad(weights)$loss)
+    weights <- em_result$weights
+    kl <- em_result$kl
 
-    if (verbose) {
-      message(sprintf(
-        "Atom %d/%d: max_E_ratio - 1 = %e",
-        atom_idx,
-        atoms_per_face,
-        E_star - 1
-      ))
-    }
+    fw <- frank_wolfe_oracle(weights)
+    face_results <- fw$face_results
+    E_star <- fw$E_star
 
     history[[atom_idx]] <- list(
       theta_stars = lapply(face_results, `[[`, "theta"),
       E_ratio = E_star,
-      weights = weights
+      kl = kl
     )
 
-    if (E_star <= 1 + tol) {
-      if (verbose) {
+    if (verbose) {
+      if (is.null(kl_prev)) {
         message(sprintf(
-          "Converged after %d atoms (max_E_ratio - 1 = %e).",
-          n_live,
-          E_star - 1
+          "Atom %d/%d: max_E_ratio - 1 = %e, KL = %e",
+          atom_idx,
+          atoms_per_face,
+          E_star - 1,
+          kl
+        ))
+      } else {
+        message(sprintf(
+          "Atom %d/%d: max_E_ratio - 1 = %e, KL = %e, delta_KL = %e",
+          atom_idx,
+          atoms_per_face,
+          E_star - 1,
+          kl,
+          kl - kl_prev
         ))
       }
+    }
+    kl_prev <- kl
+
+    if (E_star <= 1 + tol) {
       converged <- TRUE
       break
     }
 
-    new_atoms <- lapply(face_results, `[[`, "theta")
-    atoms <- c(atoms, new_atoms)
-    for (th in new_atoms) {
-      add_atom_col(th)
+    # Prepare new atoms for next iteration
+    if (atom_idx < atoms_per_face) {
+      new_atoms <- lapply(face_results, `[[`, "theta")
+      new_faces <- as.list(faces)
+      atoms <- c(atoms, new_atoms)
+      atom_faces <- c(atom_faces, new_faces)
+      for (th in new_atoms) {
+        add_atom_col(th)
+      }
+      n_curr <- n_live
+      weights <- c(
+        weights * (n_curr - n_faces) / n_curr,
+        rep(1 / n_curr, n_faces)
+      )
     }
+  }
 
-    n_curr <- n_live
-    w_init <- c(weights * (n_curr - n_faces) / n_curr, rep(1 / n_curr, n_faces))
-    weights <- reweight_mirror(
-      w_init,
-      kl_loss_and_grad,
-      max_iter = reweight_maxit
-    )
+  if (converged && verbose) {
+    message(sprintf(
+      "Converged after %d atoms (max_E_ratio - 1 = %e).",
+      n_live,
+      E_star - 1
+    ))
   }
 
   list(

@@ -79,8 +79,8 @@ add_ninf_any_ <- function(out, A, B, A_ninf = NULL) {
 #' @return Tensor of the reduced logsumexp values (one fewer dimension than `buf`).
 #' @export
 logsumexp_inplace_ <- function(buf, dim) {
-  mx <- torch_amax(buf, dim = dim, keepdim = TRUE)
-  safe_mx <- torch_where(torch_isneginf(mx), torch_zeros_like(mx), mx)
+  mx <- buf$amax(dim = dim, keepdim = TRUE)
+  safe_mx <- mx$masked_fill_(mx$isneginf(), 0)
   buf$sub_(safe_mx)$exp_()
-  buf$sum(dim = dim)$log()$add_(safe_mx$squeeze(dim))
+  buf$sum(dim = dim)$log_()$add_(safe_mx$squeeze(dim))
 }

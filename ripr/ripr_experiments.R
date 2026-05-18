@@ -6,7 +6,8 @@ box::use(
       plurality_face_descriptors_unrestricted
     ],
   ripr / multinomial_likelihood[make_multinomial_likelihood],
-  ripr / ripr_optimiser[run_ripr]
+  ripr / ripr_optimiser[run_ripr],
+  ripr / ripr_em[run_em]
 )
 
 #' RIPr optimiser for K-candidate plurality audits (multinomial)
@@ -44,7 +45,9 @@ run_plurality_ripr <- function(
   oracle_grid = 200L,
   reweight_maxit = 1000L,
   n_em_iter = 3L,
-  tol = 1e-4,
+  kl_tol = 1e-10,
+  gap_tol = 1e-10,
+  eps_seed = 1e-3,
   verbose = TRUE,
   boundary = TRUE
 ) {
@@ -64,7 +67,9 @@ run_plurality_ripr <- function(
     oracle_grid = oracle_grid,
     reweight_maxit = reweight_maxit,
     n_em_iter = n_em_iter,
-    tol = tol,
+    kl_tol = kl_tol,
+    gap_tol = gap_tol,
+    eps_seed = eps_seed,
     verbose = verbose
   )
 
@@ -75,6 +80,47 @@ run_plurality_ripr <- function(
       n = n
     ),
     history = result$history,
+    E_star = result$E_star,
     converged = result$converged
+  )
+}
+
+
+#'@export
+run_plurality_em <- function(
+  n,
+  q,
+  init_atoms_per_face = 2L,
+  max_atoms_per_face = 64L,
+  n_restarts = 3L,
+  em_maxit = 1000L,
+  em_tol = 1e-10,
+  tol = 1e-6,
+  verbose = TRUE
+) {
+  K <- nrow(q@atoms)
+  face_descriptors <- plurality_face_descriptors(K)
+  likelihood <- make_multinomial_likelihood(n, K)
+
+  result <- run_em(
+    face_descriptors = face_descriptors,
+    likelihood = likelihood,
+    q = q,
+    init_atoms_per_face = init_atoms_per_face,
+    max_atoms_per_face = max_atoms_per_face,
+    n_restarts = n_restarts,
+    em_maxit = em_maxit,
+    em_tol = em_tol,
+    tol = tol,
+    verbose = verbose
+  )
+
+  list(
+    mixture = mixture_mnom(
+      atoms = do.call(cbind, result$atoms),
+      weights = result$weights,
+      n = n
+    ),
+    history = result$history
   )
 }

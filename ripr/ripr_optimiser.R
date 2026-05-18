@@ -36,7 +36,8 @@ box::use(
 #' @param oracle_grid Grid density for per-face oracle. Default 200.
 #' @param reweight_maxit Max mirror descent iterations. Default 1000.
 #' @param n_em_iter Max EM iterations per Frank-Wolfe step. Default 3.
-#' @param tol Convergence tolerance on KL divergence. Default 1e-10.
+#' @param kl_tol Convergence tolerance on KL divergence. Default 1e-10.
+#' @param gap_tol Convergence tolerance on the duality gap. Default 1e-10.
 #' @param verbose Print progress. Default TRUE.
 #' @return List with `atoms`, `atom_faces`, `weights`, `history`, `converged`.
 #' @export
@@ -47,8 +48,10 @@ run_ripr <- function(
   atoms_per_face = 50L,
   oracle_grid = 200L,
   reweight_maxit = 1000L,
+  eps_seed = 1e-3,
   n_em_iter = 3L,
-  tol = 1e-10,
+  kl_tol = 1e-10,
+  gap_tol = 1e-10,
   verbose = TRUE
 ) {
   n_faces <- length(face_descriptors)
@@ -142,30 +145,40 @@ run_ripr <- function(
   }
 
   # --- Generic per-face optimiser: grid search + BFGS refinement ---
-  optimise_on_face <- function(fd, obj_and_grad, obj_grid_eval) {
+  optimise_on_face <- function(
+    fd,
+    obj_and_grad,
+    obj_grid_eval,
+    n_restarts = 5L
+  ) {
     n_vertices <- fd$n_vertices
     lat_density <- max(3L, round(oracle_grid^(1 / max(1L, n_vertices - 1L))))
     alpha_mat <- simplex_lattice(n_vertices, lat_density) / lat_density
 
     neg_obj_grid <- obj_grid_eval(alpha_mat)
-    best_alpha <- pmax(alpha_mat[which.max(neg_obj_grid), ], 1e-8)
-    best_alpha <- best_alpha / sum(best_alpha)
+    top_idx <- order(neg_obj_grid, decreasing = TRUE)[seq_len(min(
+      n_restarts,
+      length(neg_obj_grid)
+    ))]
 
-    res <- tryCatch(
-      stats::optim(
-        v_from_alpha(best_alpha),
-        fn = function(v) obj_and_grad(v)$value,
-        gr = function(v) obj_and_grad(v)$gradient,
-        method = "BFGS"
-      ),
-      error = function(e) {
-        list(
-          par = v_from_alpha(best_alpha),
-          value = -max(neg_obj_grid, na.rm = TRUE)
-        )
-      }
-    )
-    list(alpha_star = alpha_from_v(res$par), neg_value = res$value)
+    best <- list(par = NULL, value = Inf)
+    for (idx in top_idx) {
+      init_alpha <- pmax(alpha_mat[idx, ], 1e-8)
+      init_alpha <- init_alpha / sum(init_alpha)
+      res <- tryCatch(
+        stats::optim(
+          v_from_alpha(init_alpha),
+          fn = function(v) obj_and_grad(v)$value,
+          gr = function(v) obj_and_grad(v)$gradient,
+          method = "BFGS"
+        ),
+        error = function(e) {
+          list(par = v_from_alpha(init_alpha), value = -neg_obj_grid[idx])
+        }
+      )
+      if (res$value < best$value) best <- res
+    }
+    list(alpha_star = alpha_from_v(best$par), neg_value = best$value)
   }
 
   # --- Frank-Wolfe oracle on face fd: argmax_theta E_theta[Q / P_w] ---
@@ -205,7 +218,7 @@ run_ripr <- function(
       theta <- fd$parametrise(alpha)
       log_tm <- likelihood$log_pmf(theta)
       obj_val <- (weights_x * log_tm)$nan_to_num(nan = 0.0)$sum()$item()
-      score_gpu <- likelihood$score(theta) + likelihood$n # drop the -n term
+      score_gpu <- likelihood$score(theta) + likelihood$n
       grad_theta <- as.numeric(
         (weights_x$unsqueeze(2L) * score_gpu)$nan_to_num(nan = 0.0)$sum(
           dim = 1L
@@ -225,7 +238,11 @@ run_ripr <- function(
     }
 
     res <- optimise_on_face(fd, obj_and_grad, obj_grid_eval)
-    list(theta = fd$parametrise(res$alpha_star))
+    list(
+      theta = fd$parametrise(res$alpha_star),
+      obj = -res$neg_value, # NEW: the M-step objective at the returned theta
+      weights_x = weights_x # NEW: reuse in the caller for incumbent eval
+    )
   }
 
   # --- E-step responsibilities ---
@@ -265,13 +282,19 @@ run_ripr <- function(
       for (k in seq_len(n_live)) {
         fd_k <- face_descriptors[[atom_face_idx[[k]]]]
         result <- find_best_on_face_weighted(fd_k, log_r[, k])
-        write_atom_col(k, result$theta)
-        atoms[[k]] <<- result$theta
+
+        old_ll <- (result$weights_x * lc[, k])$nan_to_num(
+          nan = 0.0
+        )$sum()$item()
+        if (result$obj >= old_ll) {
+          write_atom_col(k, result$theta)
+          atoms[[k]] <<- result$theta
+        }
       }
 
       weights <- new_weights
       kl_new <- kl_loss_and_grad(weights)$loss
-      if (kl - kl_new < tol) {
+      if (kl - kl_new < kl_tol) {
         break
       }
       kl <- kl_new
@@ -282,12 +305,13 @@ run_ripr <- function(
   # --- Initialisation ---
   if (verbose) {
     message(sprintf(
-      "run_ripr: K=%d, M=%d outcomes, %d atoms/face, %d faces, tol=%g",
+      "run_ripr: K=%d, M=%d outcomes, %d atoms/face, %d faces, kl_tol=%g, gap_tol=%g",
       likelihood$K,
       M,
       atoms_per_face,
       n_faces,
-      tol
+      kl_tol,
+      gap_tol
     ))
   }
 
@@ -302,7 +326,16 @@ run_ripr <- function(
   weights <- rep(1 / n_faces, n_faces)
   converged <- FALSE
   history <- vector("list", atoms_per_face)
-  kl_prev <- NULL
+  kl_prev <- Inf
+
+  best <- list(
+    kl = Inf,
+    weights = NULL,
+    atoms = NULL,
+    atom_face_idx = NULL,
+    E_star = NA_real_,
+    atom_idx = NA_integer_
+  )
 
   # --- Main loop ---
   for (atom_idx in seq_len(atoms_per_face)) {
@@ -319,6 +352,18 @@ run_ripr <- function(
     face_results <- fw$face_results
     E_star <- fw$E_star
 
+    if (kl < best$kl) {
+      # Trim weights/atoms to current live set
+      best <- list(
+        kl = kl,
+        weights = weights,
+        atoms = atoms[seq_len(n_live)],
+        atom_face_idx = atom_face_idx[seq_len(n_live)],
+        E_star = E_star,
+        atom_idx = atom_idx
+      )
+    }
+
     history[[atom_idx]] <- list(
       theta_stars = lapply(face_results, `[[`, "theta"),
       E_ratio = E_star,
@@ -326,7 +371,7 @@ run_ripr <- function(
     )
 
     if (verbose) {
-      if (is.null(kl_prev)) {
+      if (is.infinite(kl_prev)) {
         message(sprintf(
           "Atom %d/%d: max_E_ratio - 1 = %e, KL = %e",
           atom_idx,
@@ -346,7 +391,7 @@ run_ripr <- function(
       }
     }
 
-    if (kl_prev - kl < tol) {
+    if (kl_prev - kl < kl_tol && E_star - 1 < gap_tol) {
       converged <- TRUE
       break
     }
@@ -362,10 +407,7 @@ run_ripr <- function(
         add_atom_col(th)
       }
       n_curr <- n_live
-      weights <- c(
-        weights * (n_curr - n_faces) / n_curr,
-        rep(1 / n_curr, n_faces)
-      )
+      weights <- c(weights * (1 - n_faces * eps_seed), rep(eps_seed, n_faces))
     }
   }
 
@@ -378,11 +420,29 @@ run_ripr <- function(
     ))
   }
 
+  if (verbose && best$kl < kl) {
+    message(sprintf(
+      "Returning snapshot from atom %d (kl = %e) over terminal state (kl = %e).",
+      best$atom_idx,
+      best$kl,
+      kl
+    ))
+  }
+
   list(
-    atoms = atoms,
-    atom_face_idx = atom_face_idx,
-    weights = weights,
+    atoms = best$atoms,
+    atom_face_idx = best$atom_face_idx,
+    weights = best$weights,
     history = history[!sapply(history, is.null)],
-    converged = converged
+    E_star = best$E_star,
+    converged = converged,
+    terminal = list(
+      # keep terminal state for diagnostics
+      atoms = atoms[seq_len(n_live)],
+      atom_face_idx = atom_face_idx[seq_len(n_live)],
+      weights = weights,
+      kl = kl,
+      E_star = E_star
+    )
   )
 }

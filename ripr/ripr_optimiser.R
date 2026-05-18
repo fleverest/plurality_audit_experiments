@@ -36,7 +36,7 @@ box::use(
 #' @param oracle_grid Grid density for per-face oracle. Default 200.
 #' @param reweight_maxit Max mirror descent iterations. Default 1000.
 #' @param n_em_iter Max EM iterations per Frank-Wolfe step. Default 3.
-#' @param tol Convergence tolerance on max E_theta. Default 1e-4.
+#' @param tol Convergence tolerance on KL divergence. Default 1e-10.
 #' @param verbose Print progress. Default TRUE.
 #' @return List with `atoms`, `atom_faces`, `weights`, `history`, `converged`.
 #' @export
@@ -48,7 +48,7 @@ run_ripr <- function(
   oracle_grid = 200L,
   reweight_maxit = 1000L,
   n_em_iter = 3L,
-  tol = 1e-4,
+  tol = 1e-10,
   verbose = TRUE
 ) {
   n_faces <- length(face_descriptors)
@@ -345,12 +345,13 @@ run_ripr <- function(
         ))
       }
     }
-    kl_prev <- kl
 
-    if (E_star <= 1 + tol) {
+    if (kl_prev - kl < tol) {
       converged <- TRUE
       break
     }
+
+    kl_prev <- kl
 
     if (atom_idx < atoms_per_face) {
       new_atoms <- lapply(face_results, `[[`, "theta")
@@ -370,9 +371,10 @@ run_ripr <- function(
 
   if (converged && verbose) {
     message(sprintf(
-      "Converged after %d atoms (max_E_ratio - 1 = %e).",
+      "Converged after %d atoms (max_E_ratio - 1 = %e, kl = %e).",
       n_live,
-      E_star - 1
+      E_star - 1,
+      kl
     ))
   }
 

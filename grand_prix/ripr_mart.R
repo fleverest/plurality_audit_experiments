@@ -30,21 +30,15 @@ box::use(
 # sup_{θ on null boundary} E_θ[Y_{t+1} | c_t].
 # log_Y_next[k] = log Y_{t+1}(c_t + e_k) for k = 1,...,K.
 # Boundary vertex for subset S ⊆ {2,...,K} has θ[1] = θ[j] = 1/(|S|+1) for
-# j ∈ S, giving E_θ[Y] = (Y[1] + Σ_{j∈S} Y[j]) / (|S|+1). We maximise over
-# all 2^{K-1}-1 non-empty subsets.
+# j ∈ S, giving E_θ[Y] = (Y[1] + Σ_{j∈S} Y[j]) / (|S|+1). The optimal S is
+# always a prefix of the competitors sorted by Y descending (swapping any
+# element for a larger one can only raise the average), so we check K-1
+# prefix averages rather than all 2^{K-1} subsets.
 .sup_boundary <- function(log_Y_next) {
   K <- length(log_Y_next)
   Y <- exp(log_Y_next)
-  best <- 0
-  for (size in seq_len(K - 1L)) {
-    vals <- apply(
-      combn(2:K, size),
-      2L,
-      function(S) (Y[1L] + sum(Y[S])) / (size + 1L)
-    )
-    best <- max(best, vals)
-  }
-  best
+  cum_sums <- Y[1L] + cumsum(sort(Y[-1L], decreasing = TRUE))
+  max(cum_sums / (seq_len(K - 1L) + 1L))
 }
 
 # ---------------------------------------------------------------------------

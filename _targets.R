@@ -4,8 +4,16 @@ library(crew.cluster)
 box::use(
   ripr / mixture[point_mnom, dirichlet_mnom],
   ripr / grids[simplex_lattice],
-  ripr / ripr_colgen_boundary[run_boundary_ripr]
+  ripr / ripr_experiments[run_plurality_ripr],
+  # These S7 modules aren't working for some reason.
+  #  grand_prix / ui_mart[UITest],
+  #  grand_prix / im_mart[InfimumMartingale],
+  #  grand_prix / ripr_mart[BatchRIPr]
+  grand_prix / martingale_sequences[run_martingale]
 )
+source("grand_prix/ui_mart.R")
+source("grand_prix/im_mart.R")
+source("grand_prix/ripr_mart.R")
 
 # Second IP address is reachable from other compute nodes on M3
 is_m3 <- grepl("m3", Sys.info()[["nodename"]])
@@ -31,7 +39,7 @@ gpu_controller <- if (!is_m3) {
 
 tar_option_set(
   seed = 20260516L,
-  controller = if (is_m3) gpu_controller else NULL
+  controller = gpu_controller
 )
 
 
@@ -50,77 +58,207 @@ simplex_k4_alt <- t(simplex_k4_alt[
 
 list(
   tar_target(
-    alternative,
+    max_n,
+    10L
+  ),
+
+  tar_target(n_vals, as.list(seq_len(max_n))),
+
+  # Alternative distributions Q used as the numerator in each martingale.
+  # Both point and Dirichlet mixture variants are included for comparison.
+  # InfimumMartingale only runs for point alternatives (single-atom mixture_mnom).
+  tar_target(
+    sim_Q,
     list(
-      list(name = "point_754", Q = point_mnom(q = c(7 / 16, 5 / 16, 4 / 16))),
-      list(name = "point_844", Q = point_mnom(q = c(8 / 16, 4 / 16, 4 / 16))),
+      list(
+        name = "point_754",
+        K = 3L,
+        Q = point_mnom(q = c(7 / 16, 5 / 16, 4 / 16))
+      ),
       list(
         name = "dirichlet_754",
+        K = 3L,
         Q = dirichlet_mnom(alpha = c(7, 5, 4), atoms = simplex_k3_alt)
       ),
       list(
-        name = "dirichlet_844",
-        Q = dirichlet_mnom(alpha = c(8, 4, 4), atoms = simplex_k3_alt)
+        name = "point_855",
+        K = 3L,
+        Q = point_mnom(q = c(8 / 18, 5 / 18, 5 / 18))
+      ),
+      list(
+        name = "dirichlet_855",
+        K = 3L,
+        Q = dirichlet_mnom(alpha = c(8, 5, 5), atoms = simplex_k3_alt)
       ),
       list(
         name = "point_7531",
+        K = 4L,
         Q = point_mnom(q = c(7 / 16, 5 / 16, 3 / 16, 1 / 16))
       ),
       list(
-        name = "point_8222",
-        Q = point_mnom(q = c(8 / 16, 2 / 16, 2 / 16, 2 / 16))
-      ),
-      list(
         name = "dirichlet_7531",
+        K = 4L,
         Q = dirichlet_mnom(alpha = c(7, 5, 3, 1), atoms = simplex_k4_alt)
       ),
       list(
-        name = "dirichlet_8222",
-        Q = dirichlet_mnom(alpha = c(8, 2, 2, 2), atoms = simplex_k4_alt)
-      )
-    )
-  ),
-  tar_target(n, as.list(seq_len(50L))),
-  tar_target(
-    ripr_boundary,
-    c(
-      list(alt_name = alternative[[1L]]$name, n = n[[1L]]),
-      run_boundary_ripr(
-        n = n[[1L]],
-        q = alternative[[1L]]$Q,
-        atoms_per_face = 200L
-      )
-    ),
-    pattern = cross(alternative, n),
-    iteration = "list"
-  ),
-  tar_target(
-    grand_prix_sims,
-    list(
-      list(
-        name = "p_754",
-        replicate(
-          10000,
-          sample(
-            1:3,
-            size = 200,
-            replace = TRUE,
-            prob = c(7 / 16, 5 / 16, 4 / 16)
-          )
-        )
+        name = "point_8444",
+        K = 4L,
+        Q = point_mnom(q = c(8 / 20, 4 / 20, 4 / 20, 4 / 20))
       ),
       list(
-        name = "p_844",
-        replicate(
-          10000,
+        name = "dirichlet_8444",
+        K = 4L,
+        Q = dirichlet_mnom(alpha = c(8, 4, 4, 4), atoms = simplex_k4_alt)
+      )
+    )
+  ),
+
+  # -------------------------------------------------------------------------
+  # Compute the RIPr optimal P_W for each Q alternative and batch size.
+  # This is the most computationally intensive step, so we do it first and on
+  # the GPU if available. The resulting P_W's are then used in the BatchRIPr
+  # target below, which runs on the CPU but is much faster.
+  # -------------------------------------------------------------------------
+  tar_target(
+    sim_ripr_optimal,
+    {
+      q_opt <- sim_Q[[1L]]
+      n <- n_vals[[1L]]
+      result <- run_plurality_ripr(
+        n = n,
+        q = q_opt$Q,
+        atoms_per_face = 20L,
+        verbose = TRUE
+      )
+      list(
+        Q_name = q_opt$name,
+        K = q_opt$K,
+        Q = q_opt$Q,
+        P_W = result$mixture,
+        e_ratio = result$E_star
+      )
+    },
+    pattern = cross(sim_Q, n_vals),
+    iteration = "list"
+  ),
+
+  # --------------------------------------------------------------------------
+  # Grand Prix: comparison of UITest, InfimumMartingale, BatchRIPr martingales.
+  # Mirrors grand_prix/simulations.R with a proper targets pipeline.
+  # --------------------------------------------------------------------------
+
+  # Scenarios: true data-generating distributions. Sequences are 100 draws from
+  # multiomial(1, q).
+  tar_target(
+    sim_scenario,
+    list(
+      list(name = "point_754", q = c(7 / 16, 5 / 16, 4 / 16), K = 3L),
+      list(name = "point_855", q = c(8 / 18, 5 / 18, 5 / 18), K = 3L),
+      list(name = "point_7531", q = c(7 / 16, 5 / 16, 3 / 16, 1 / 16), K = 4L),
+      list(name = "point_8444", q = c(8 / 20, 4 / 20, 4 / 20, 4 / 20), K = 4L)
+    )
+  ),
+
+  # 1000L sequences per scenario.
+  tar_target(
+    sim_reps,
+    1000L
+  ),
+  # (sim_reps, max_n) matrices of simulated sequences for each scenario.
+  tar_target(
+    sim_seqs,
+    c(
+      sim_scenario[[1L]],
+      list(
+        data = replicate(
+          sim_reps,
           sample(
-            1:3,
-            size = 200,
+            seq_len(sim_scenario[[1L]]$K),
+            size = max_n,
             replace = TRUE,
-            prob = c(8 / 16, 4 / 16, 4 / 16)
+            prob = sim_scenario[[1L]]$q
           )
         )
       )
-    )
+    ),
+    pattern = map(sim_scenario),
+    iteration = "list"
+  ),
+
+  # UITest (Universal Inference) — one branch per scenario, inner lapply over
+  # matching Q alternatives (same K). Returns a list of {Q_name, dgp_name,
+  # values (max_n x sim_reps matrix)}, one entry per matching Q.
+  tar_target(
+    universal_inference,
+    {
+      ss <- sim_seqs
+      lapply(
+        Filter(function(sq) sq$K == ss$K, sim_Q),
+        function(sq) {
+          list(
+            Q_name = sq$name,
+            dgp_name = ss$name,
+            values = run_martingale(UITest(sq$Q, 0.05), ss$data)
+          )
+        }
+      )
+    },
+    pattern = map(sim_seqs),
+    iteration = "list"
+  ),
+
+  # InfimumMartingale — same structure as universal_inference.
+  tar_target(
+    infimum_martingale,
+    {
+      ss <- sim_seqs
+      lapply(
+        Filter(function(sq) sq$K == ss$K, sim_Q),
+        function(sq) {
+          list(
+            Q_name = sq$name,
+            dgp_name = ss$name,
+            values = run_martingale(InfimumMartingale(sq$Q, 0.05), ss$data)
+          )
+        }
+      )
+    },
+    pattern = map(sim_seqs),
+    iteration = "list"
+  ),
+
+  # BatchRIPr — one branch per scenario, nested lapply over matching Q
+  # alternatives and batch sizes. Returns a nested list of {Q_name, dgp_name,
+  # batch_size, values (max_n x sim_reps matrix)}.
+  tar_target(
+    batch_sizes,
+    list(1L, 5L, 10L)
+  ),
+  tar_target(
+    batch_ripr,
+    {
+      ss <- sim_seqs
+      bs <- batch_sizes
+      lapply(
+        Filter(function(sq) sq$K == ss$K, sim_Q),
+        function(sq) {
+          ripr_entry <- Filter(
+            function(r) r$Q_name == sq$name && r$P_W@n == bs,
+            sim_ripr_optimal
+          )[[1L]]
+          list(
+            Q_name = sq$name,
+            dgp_name = ss$name,
+            batch_size = bs,
+            values = run_martingale(
+              BatchRIPr(sq$Q, ripr_entry$P_W, ripr_entry$e_ratio, 0.05),
+              ss$data
+            )
+          )
+        }
+      )
+    },
+    pattern = cross(sim_seqs, batch_sizes),
+    iteration = "list"
   )
 )

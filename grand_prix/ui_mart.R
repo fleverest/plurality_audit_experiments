@@ -1,7 +1,7 @@
 box::use(
   ripr / mixture[mixture_mnom],
   grand_prix / martingale_utils[log_mixture_mass],
-  S7[new_class, new_object, method, `method<-`, class_numeric],
+  S7[new_class, new_object, method, `method<-`, class_numeric, S7_object],
   seqan[
     Test,
     update,

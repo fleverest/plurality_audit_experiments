@@ -8,7 +8,8 @@ box::use(
     `method<-`,
     class_numeric,
     class_any,
-    class_integer
+    class_integer,
+    S7_object
   ],
   seqan[
     Test,

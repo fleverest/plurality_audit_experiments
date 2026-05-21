@@ -9,7 +9,8 @@ box::use(
   #  grand_prix / ui_mart[UITest],
   #  grand_prix / im_mart[InfimumMartingale],
   #  grand_prix / ripr_mart[BatchRIPr]
-  grand_prix / martingale_sequences[run_martingale]
+  grand_prix / martingale_sequences[run_martingale],
+  grand_prix / plot_utils[build_sim_long, plot_mean_martingales]
 )
 source("grand_prix/ui_mart.R")
 source("grand_prix/im_mart.R")
@@ -59,7 +60,7 @@ simplex_k4_alt <- t(simplex_k4_alt[
 list(
   tar_target(
     max_n,
-    10L
+    100L
   ),
 
   tar_target(n_vals, as.list(seq_len(max_n))),
@@ -127,7 +128,8 @@ list(
       result <- run_plurality_ripr(
         n = n,
         q = q_opt$Q,
-        atoms_per_face = 20L,
+        max_atoms_added = 10L,
+        n_em_iter = 100L,
         verbose = TRUE
       )
       list(
@@ -227,6 +229,36 @@ list(
     iteration = "list"
   ),
 
+  # RIPrSequence — uncorrected Y_t = Q(X^t) / P_W^t(X^t), same structure as
+  # universal_inference. P_W^t is looked up from sim_ripr_optimal by n.
+  tar_target(
+    ripr_sequence,
+    {
+      ss <- sim_seqs
+      lapply(
+        Filter(function(sq) sq$K == ss$K, sim_Q),
+        function(sq) {
+          q_name <- sq$name
+          # Function to retrieve the appropriate P_W and e_ratio from sim_ripr_optimal for a given n.
+          ripr_fn <- function(n) {
+            entry <- Filter(
+              function(r) r$Q_name == q_name && r$P_W@n == n,
+              sim_ripr_optimal
+            )[[1L]]
+            list(mixture = entry$P_W, e_ratio = entry$e_ratio)
+          }
+          list(
+            Q_name = sq$name,
+            dgp_name = ss$name,
+            values = run_martingale(RIPrSequence(sq$Q, ripr_fn, 0.05), ss$data)
+          )
+        }
+      )
+    },
+    pattern = map(sim_seqs),
+    iteration = "list"
+  ),
+
   # BatchRIPr — one branch per scenario, nested lapply over matching Q
   # alternatives and batch sizes. Returns a nested list of {Q_name, dgp_name,
   # batch_size, values (max_n x sim_reps matrix)}.
@@ -260,5 +292,24 @@ list(
     },
     pattern = cross(sim_seqs, batch_sizes),
     iteration = "list"
-  )
+  ),
+
+  # -------------------------------------------------------------------------
+  # Plots: mean e-process vs step, one plot per DGP.
+  # Colour = martingale type, linetype = Point/Dirichlet Q, facets = Q mode.
+  # -------------------------------------------------------------------------
+  tar_target(
+    sim_long,
+    build_sim_long(
+      universal_inference,
+      infimum_martingale,
+      ripr_sequence,
+      batch_ripr
+    )
+  ),
+
+  tar_target(sim_plot_754, plot_mean_martingales(sim_long, "point_754", 3L)),
+  tar_target(sim_plot_855, plot_mean_martingales(sim_long, "point_855", 3L)),
+  tar_target(sim_plot_7531, plot_mean_martingales(sim_long, "point_7531", 4L)),
+  tar_target(sim_plot_8444, plot_mean_martingales(sim_long, "point_8444", 4L))
 )

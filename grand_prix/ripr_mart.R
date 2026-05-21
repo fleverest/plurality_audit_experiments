@@ -28,6 +28,158 @@ box::use(
   log_mixture_mass(counts, Q) - log_mixture_mass(counts, P_W)
 }
 
+
+# ---------------------------------------------------------------------------
+# RIPrSequence — uncorrected RIPr e-variable sequence (not a martingale)
+# ---------------------------------------------------------------------------
+#
+# Y_t = Q(X^t) / P_W^t(X^t), where P_W^t = ripr_fn(t)$mixture.
+# No correction factor is applied, so this is not a valid e-process under H_0
+# in general. Useful for diagnosing how much the supermartingale correction
+# in DirectRIPrSequenceTest costs.
+
+#' Uncorrected RIPr e-variable sequence
+#'
+#' Tracks Y_t = Q(X^t) / P_W^t(X^t) at each step, where P_W^t is the
+#' boundary-optimal mixture returned by `ripr_fn(t)`. Unlike
+#' [DirectRIPrSequenceTest()], no correction factor is applied, so this
+#' sequence is not a valid e-process.
+#'
+#' @param Q A `mixture_mnom` alternative.
+#' @param ripr_fn Function of signature `function(n)` returning
+#'   `list(mixture = mixture_mnom, e_ratio = numeric)`.
+#' @param alpha Numeric. Significance level for the stopping threshold.
+#'   Default: 0.05.
+#' @param stream Optional stream object.
+#' @return A `RIPrSequence` object.
+#' @export
+RIPrSequence <- new_class(
+  "RIPrSequence",
+  parent = Test,
+  properties = list(
+    Q = mixture_mnom,
+    alpha = class_numeric,
+    ripr_fn = class_any
+  ),
+  constructor = function(Q, ripr_fn, alpha = 0.05, stream = NULL) {
+    K <- nrow(Q@atoms)
+    if (alpha <= 0 || alpha >= 1) {
+      stop("alpha must be in (0, 1)")
+    }
+    if (!is.function(ripr_fn)) {
+      stop("ripr_fn must be a function(n) returning list(mixture, e_ratio)")
+    }
+
+    state <- new.env(parent = emptyenv())
+    state$counts <- integer(K)
+    state$log_Y <- 0
+    state$history <- 1
+    state$n <- 0L
+    state$stop_time <- NA_integer_
+    state$decision <- "continue"
+
+    new_object(
+      S7_object(),
+      Q = Q,
+      alpha = alpha,
+      ripr_fn = ripr_fn,
+      stream = stream,
+      description = sprintf(
+        "RIPr sequence (uncorrected, %d-candidate plurality)",
+        K
+      ),
+      state = state
+    )
+  }
+)
+
+#' @export
+method(update, RIPrSequence) <- function(stat, new_x = NULL, ...) {
+  if (is_stopped(stat)) {
+    message("RIPrSequence has already stopped. Use reset() to restart.")
+  }
+  if (is.null(new_x)) {
+    if (is.null(stat@stream)) {
+      stop("Provide new_x or attach a stream.")
+    }
+    new_x <- fetch(stat@stream)
+  }
+  if (length(new_x) == 0) {
+    return(invisible(stat))
+  }
+
+  threshold <- 1 / stat@alpha
+  old_n <- stat@state$n
+  new_vals <- numeric(length(new_x))
+
+  for (i in seq_along(new_x)) {
+    ripr <- stat@ripr_fn(old_n + i)
+    x <- new_x[i]
+    stat@state$counts[x] <- stat@state$counts[x] + 1L
+    stat@state$log_Y <- .log_Y(stat@state$counts, stat@Q, ripr$mixture)
+    new_vals[i] <- exp(stat@state$log_Y)
+  }
+
+  stat@state$history <- c(stat@state$history, new_vals)
+  stat@state$n <- old_n + length(new_x)
+
+  if (!is_stopped(stat)) {
+    crossed <- which(new_vals >= threshold)
+    if (length(crossed) > 0L) {
+      stat@state$decision <- "reject_H0"
+      stat@state$stop_time <- old_n + crossed[1L]
+      message("RIPrSequence: rejection threshold reached.")
+    }
+  }
+
+  invisible(stat)
+}
+
+#' @export
+method(reset, RIPrSequence) <- function(object, ...) {
+  object@state$counts <- integer(nrow(object@Q@atoms))
+  object@state$log_Y <- 0
+  object@state$history <- 1
+  object@state$n <- 0L
+  object@state$stop_time <- NA_integer_
+  object@state$decision <- "continue"
+  if (!is.null(object@stream)) {
+    reset(object@stream)
+  }
+  invisible(object)
+}
+
+#' @export
+method(is_stopped, RIPrSequence) <- function(stat, ...) {
+  decision(stat) != "continue"
+}
+#' @export
+method(decision, RIPrSequence) <- function(test, ...) test@state$decision
+#' @export
+method(n_obs, RIPrSequence) <- function(stat, ...) stat@state$n
+#' @export
+method(stopping_time, RIPrSequence) <- function(test, ...) test@state$stop_time
+#' @export
+method(value, RIPrSequence) <- function(stat, n = 1L, ...) {
+  tail(stat@state$history, n = n)
+}
+#' @export
+method(print, RIPrSequence) <- function(x, ...) {
+  K <- nrow(x@Q@atoms)
+  cat(sprintf("RIPr sequence (uncorrected, %d-candidate plurality)\n", K))
+  cat("Atoms:", ncol(x@Q@atoms), "\n")
+  cat("Observations:", x@state$n, "\n")
+  cat("Counts:", x@state$counts, "\n")
+  if (is_stopped(x)) {
+    cat("Stopping time:", x@state$stop_time, "\n")
+  }
+  cat("Current Y_t:", round(tail(x@state$history, 1L), 4), "\n")
+  cat("Rejection threshold:", round(1 / x@alpha, 4), "\n")
+  cat("Decision:", decision(x), "\n")
+  invisible(x)
+}
+
+
 # sup_{θ on null boundary} E_θ[Y_{t+1} | c_t].
 # log_Y_next[k] = log Y_{t+1}(c_t + e_k) for k = 1,...,K.
 # Boundary vertex for subset S ⊆ {2,...,K} has θ[1] = θ[j] = 1/(|S|+1) for
@@ -43,53 +195,44 @@ box::use(
 }
 
 # ---------------------------------------------------------------------------
-# DirectRIPrSequenceTest — fixed-t RIPr e-variables corrected to a
-# supermartingale (K-candidate plurality)
+# CorrectedRIPrSequence — supermartingale correction layered on RIPrSequence
 # ---------------------------------------------------------------------------
 #
-# ripr_fn is a user-supplied function(n) that returns list(mixture, e_ratio)
-# where mixture is the boundary-optimal P_W (a mixture_mnom) for sample size n.
-# Q is the alternative distribution (a mixture_mnom; use point_mnom for point).
+# Z_t = a_t * Y_t, where Y_t is tracked by an inner RIPrSequence.
+# At each step the correction accumulates:
+#   log a_{t+1} = log a_t + log Y_t - log sup_{theta in H_0} E_theta[Y_{t+1} | X^t]
+# which enforces E_theta[Z_{t+1} | X^t] <= Z_t for all theta in H_0.
 
-#' Direct RIPr sequence test (supermartingale)
+#' Corrected RIPr sequence (supermartingale)
 #'
-#' At each step t, evaluates the RIPr e-value Y_t = Q(X^t) / P_W^t(X^t) for
-#' the boundary-optimal mixture P_W^t returned by `ripr_fn(t)`. A running
-#' correction factor a_t enforces the supermartingale property; the test
-#' statistic is Z_t = a_t * Y_t.
+#' Wraps a [RIPrSequence()] and applies a step-by-step multiplicative correction
+#' to enforce the supermartingale property. The test statistic is Z_t = a_t * Y_t,
+#' where Y_t = Q(X^t) / P_W^t(X^t) is the uncorrected e-variable (accessible via
+#' `x@inner`) and a_t is the accumulated correction factor.
 #'
-#' @param Q A `mixture_mnom` alternative. Use [point_mnom()] or
-#'   [dirichlet_mnom()].
+#' @param Q A `mixture_mnom` alternative. Use [point_mnom()] or [dirichlet_mnom()].
 #' @param ripr_fn Function of signature `function(n)` returning
-#'   `list(mixture = mixture_mnom, e_ratio = numeric)` — the boundary-optimal
-#'   P_W and its duality gap for sample size n.
+#'   `list(mixture = mixture_mnom, e_ratio = numeric)`.
 #' @param alpha Numeric. Significance level. Default: 0.05.
 #' @param stream Optional stream object.
-#' @return A `DirectRIPrSequenceTest` object.
+#' @return A `CorrectedRIPrSequence` object.
 #' @export
-DirectRIPrSequenceTest <- new_class(
-  "DirectRIPrSequenceTest",
+CorrectedRIPrSequence <- new_class(
+  "CorrectedRIPrSequence",
   parent = Test,
   properties = list(
-    Q = mixture_mnom,
-    alpha = class_numeric,
-    ripr_fn = class_any # function(n) -> list(mixture = mixture_mnom, e_ratio)
+    inner = RIPrSequence,
+    alpha = class_numeric
   ),
   constructor = function(Q, ripr_fn, alpha = 0.05, stream = NULL) {
     K <- nrow(Q@atoms)
     if (alpha <= 0 || alpha >= 1) {
       stop("alpha must be in (0, 1)")
     }
-    if (!is.function(ripr_fn)) {
-      stop("ripr_fn must be a function(n) returning list(mixture, e_ratio)")
-    }
 
     state <- new.env(parent = emptyenv())
-    state$counts <- integer(K)
     state$log_a <- 0
-    state$log_Y <- 0
     state$history_Z <- 1
-    state$history_Y <- 1
     state$history_a <- 1
     state$n <- 0L
     state$stop_time <- NA_integer_
@@ -97,12 +240,11 @@ DirectRIPrSequenceTest <- new_class(
 
     new_object(
       S7_object(),
-      Q = Q,
+      inner = RIPrSequence(Q, ripr_fn, alpha),
       alpha = alpha,
-      ripr_fn = ripr_fn,
       stream = stream,
       description = sprintf(
-        "Direct RIPr sequence test (supermartingale, %d-candidate plurality)",
+        "Corrected RIPr sequence (supermartingale, %d-candidate plurality)",
         K
       ),
       state = state
@@ -111,10 +253,10 @@ DirectRIPrSequenceTest <- new_class(
 )
 
 #' @export
-method(update, DirectRIPrSequenceTest) <- function(stat, new_x = NULL, ...) {
+method(update, CorrectedRIPrSequence) <- function(stat, new_x = NULL, ...) {
   if (is_stopped(stat)) {
     message(
-      "DirectRIPrSequenceTest has already stopped. Use reset() to restart."
+      "CorrectedRIPrSequence has already stopped. Use reset() to restart."
     )
   }
   if (is.null(new_x)) {
@@ -129,49 +271,42 @@ method(update, DirectRIPrSequenceTest) <- function(stat, new_x = NULL, ...) {
 
   threshold <- 1 / stat@alpha
   old_n <- stat@state$n
-  K <- nrow(stat@Q@atoms)
-  m <- length(new_x)
-  new_z <- numeric(m)
-  new_y <- numeric(m)
-  new_a <- numeric(m)
+  K <- nrow(stat@inner@Q@atoms)
+  new_z <- numeric(length(new_x))
+  new_a <- numeric(length(new_x))
 
   for (i in seq_along(new_x)) {
-    t_next <- old_n + i
-    ripr <- stat@ripr_fn(t_next)
+    ripr <- stat@inner@ripr_fn(old_n + i)
 
     log_Y_next <- vapply(
       seq_len(K),
       function(k) {
-        cnext <- stat@state$counts
+        cnext <- stat@inner@state$counts
         cnext[k] <- cnext[k] + 1L
-        .log_Y(cnext, stat@Q, ripr$mixture)
+        .log_Y(cnext, stat@inner@Q, ripr$mixture)
       },
       numeric(1L)
     )
 
     sup_val <- .sup_boundary(log_Y_next)
-    stat@state$log_a <- stat@state$log_a + stat@state$log_Y - log(sup_val)
+    stat@state$log_a <- stat@state$log_a + stat@inner@state$log_Y - log(sup_val)
 
-    x <- new_x[i]
-    stat@state$counts[x] <- stat@state$counts[x] + 1L
-    stat@state$log_Y <- log_Y_next[x]
+    update(stat@inner, new_x[i])
 
-    new_z[i] <- exp(stat@state$log_a + stat@state$log_Y)
-    new_y[i] <- exp(stat@state$log_Y)
+    new_z[i] <- exp(stat@state$log_a + stat@inner@state$log_Y)
     new_a[i] <- exp(stat@state$log_a)
   }
 
   stat@state$history_Z <- c(stat@state$history_Z, new_z)
-  stat@state$history_Y <- c(stat@state$history_Y, new_y)
   stat@state$history_a <- c(stat@state$history_a, new_a)
-  stat@state$n <- old_n + m
+  stat@state$n <- old_n + length(new_x)
 
   if (!is_stopped(stat)) {
     crossed <- which(new_z >= threshold)
     if (length(crossed) > 0L) {
       stat@state$decision <- "reject_H0"
       stat@state$stop_time <- old_n + crossed[1L]
-      message("DirectRIPrSequenceTest: rejection threshold reached.")
+      message("CorrectedRIPrSequence: rejection threshold reached.")
     }
   }
 
@@ -179,12 +314,10 @@ method(update, DirectRIPrSequenceTest) <- function(stat, new_x = NULL, ...) {
 }
 
 #' @export
-method(reset, DirectRIPrSequenceTest) <- function(object, ...) {
-  object@state$counts <- integer(nrow(object@Q@atoms))
+method(reset, CorrectedRIPrSequence) <- function(object, ...) {
+  reset(object@inner)
   object@state$log_a <- 0
-  object@state$log_Y <- 0
   object@state$history_Z <- 1
-  object@state$history_Y <- 1
   object@state$history_a <- 1
   object@state$n <- 0L
   object@state$stop_time <- NA_integer_
@@ -196,40 +329,38 @@ method(reset, DirectRIPrSequenceTest) <- function(object, ...) {
 }
 
 #' @export
-method(is_stopped, DirectRIPrSequenceTest) <- function(stat, ...) {
+method(is_stopped, CorrectedRIPrSequence) <- function(stat, ...) {
   decision(stat) != "continue"
 }
 #' @export
-method(decision, DirectRIPrSequenceTest) <- function(test, ...) {
+method(decision, CorrectedRIPrSequence) <- function(test, ...) {
   test@state$decision
 }
 #' @export
-method(n_obs, DirectRIPrSequenceTest) <- function(stat, ...) stat@state$n
+method(n_obs, CorrectedRIPrSequence) <- function(stat, ...) stat@state$n
 #' @export
-method(stopping_time, DirectRIPrSequenceTest) <- function(test, ...) {
+method(stopping_time, CorrectedRIPrSequence) <- function(test, ...) {
   test@state$stop_time
 }
-
 #' @export
-method(value, DirectRIPrSequenceTest) <- function(stat, n = 1L, ...) {
+method(value, CorrectedRIPrSequence) <- function(stat, n = 1L, ...) {
   tail(stat@state$history_Z, n = n)
 }
-
 #' @export
-method(print, DirectRIPrSequenceTest) <- function(x, ...) {
-  K <- nrow(x@Q@atoms)
+method(print, CorrectedRIPrSequence) <- function(x, ...) {
+  K <- nrow(x@inner@Q@atoms)
   cat(sprintf(
-    "Direct RIPr sequence test (supermartingale, %d-candidate plurality)\n",
+    "Corrected RIPr sequence (supermartingale, %d-candidate plurality)\n",
     K
   ))
-  cat("Atoms:", ncol(x@Q@atoms), "\n")
+  cat("Atoms:", ncol(x@inner@Q@atoms), "\n")
   cat("Observations:", x@state$n, "\n")
-  cat("Counts:", x@state$counts, "\n")
+  cat("Counts:", x@inner@state$counts, "\n")
   if (is_stopped(x)) {
     cat("Stopping time:", x@state$stop_time, "\n")
   }
   cat("Current Z_t:", round(tail(x@state$history_Z, 1L), 4), "\n")
-  cat("Current Y_t:", round(tail(x@state$history_Y, 1L), 4), "\n")
+  cat("Current Y_t:", round(tail(x@inner@state$history, 1L), 4), "\n")
   cat("Current a_t:", round(tail(x@state$history_a, 1L), 4), "\n")
   cat("Rejection threshold:", round(1 / x@alpha, 4), "\n")
   cat("Decision:", decision(x), "\n")

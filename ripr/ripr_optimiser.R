@@ -2,7 +2,8 @@ box::use(
   torch[
     torch_tensor,
     torch_full,
-    torch_logsumexp
+    torch_logsumexp,
+    torch_maximum
   ],
   ripr / torch_settings[device, dtype],
   ripr / tensor_ops[add_ninf_any_, logsumexp_inplace_],
@@ -12,7 +13,6 @@ box::use(
       alpha_from_v,
       v_from_alpha,
       softmax_jacobian,
-      mirror_descent,
       simplex_lattice
     ]
 )
@@ -32,9 +32,8 @@ box::use(
 #'   `M`, `log_pmf`, `log_pmf_batch`, `score`, `n`, `K`. See
 #'   [make_multinomial_likelihood()] for the multinomial example.
 #' @param q A `mixture_mnom` -- the numerator distribution Q.
-#' @param atoms_per_face Maximum atoms per face. Default 50.
+#' @param max_atoms_added Maximum atoms added (beyond initialisation). Default 50.
 #' @param oracle_grid Grid density for per-face oracle. Default 200.
-#' @param reweight_maxit Max mirror descent iterations. Default 1000.
 #' @param n_em_iter Max EM iterations per Frank-Wolfe step. Default 3.
 #' @param kl_tol Convergence tolerance on KL divergence. Default 1e-10.
 #' @param gap_tol Convergence tolerance on the duality gap. Default 1e-10.
@@ -45,17 +44,15 @@ run_ripr <- function(
   face_descriptors,
   likelihood,
   q,
-  atoms_per_face = 50L,
+  max_atoms_added = 50L,
   oracle_grid = 200L,
-  reweight_maxit = 1000L,
-  eps_seed = 1e-3,
   n_em_iter = 3L,
   kl_tol = 1e-10,
   gap_tol = 1e-10,
   verbose = TRUE
 ) {
   n_faces <- length(face_descriptors)
-  max_atoms <- atoms_per_face * n_faces
+  max_atoms <- n_faces + max_atoms_added
   M <- likelihood$M
   X_mat_gpu <- likelihood$support_tensor
 
@@ -265,7 +262,26 @@ run_ripr <- function(
       find_best_on_face(fd, log_Pw_gpu)
     })
     E_ratios <- vapply(face_results, `[[`, "E_ratio", FUN.VALUE = numeric(1L))
-    list(face_results = face_results, E_star = max(E_ratios))
+    best_fi <- which.max(E_ratios)
+    list(
+      log_Pw_gpu = log_Pw_gpu,
+      face_results = face_results,
+      E_star = E_ratios[best_fi],
+      best_theta = face_results[[best_fi]]$theta,
+      best_fi = best_fi
+    )
+  }
+
+  # --- Line search: optimal mixing weight for a new atom ---
+  line_search <- function(log_Pw_gpu, log_tm_new) {
+    m <- torch_maximum(log_Pw_gpu, log_tm_new)
+    exp_a <- (log_Pw_gpu - m)$exp()
+    exp_b <- (log_tm_new - m)$exp()
+    g <- function(eps) {
+      log_mix <- m + ((1 - eps) * exp_a + eps * exp_b)$log()
+      -(q_mass_gpu * log_mix)$nan_to_num(nan = 0.0)$sum()$item()
+    }
+    stats::optimize(g, interval = c(1e-10, 1 - 1e-10))$minimum
   }
 
   # --- EM refinement ---
@@ -308,7 +324,7 @@ run_ripr <- function(
       "run_ripr: K=%d, M=%d outcomes, %d atoms/face, %d faces, kl_tol=%g, gap_tol=%g",
       likelihood$K,
       M,
-      atoms_per_face,
+      max_atoms_added,
       n_faces,
       kl_tol,
       gap_tol
@@ -325,7 +341,7 @@ run_ripr <- function(
 
   weights <- rep(1 / n_faces, n_faces)
   converged <- FALSE
-  history <- vector("list", atoms_per_face)
+  history <- vector("list", max_atoms_added)
   kl_prev <- Inf
 
   best <- list(
@@ -337,23 +353,27 @@ run_ripr <- function(
     atom_idx = NA_integer_
   )
 
-  # --- Main loop ---
-  for (atom_idx in seq_len(atoms_per_face)) {
-    weights <- mirror_descent(
-      weights,
-      kl_loss_and_grad,
-      max_iter = reweight_maxit
-    )
-    em_result <- run_em_step(weights, n_em_iter, kl_loss_and_grad(weights)$loss)
-    weights <- em_result$weights
-    kl <- em_result$kl
-
+  # --- Main loop: one atom per iteration, line-search mixing weight ---
+  for (atom_idx in seq_len(max_atoms_added)) {
     fw <- frank_wolfe_oracle(weights)
-    face_results <- fw$face_results
     E_star <- fw$E_star
 
+    log_tm_new <- likelihood$log_pmf(fw$best_theta)
+    eps_star <- line_search(fw$log_Pw_gpu, log_tm_new)
+
+    weights <- c(weights * (1 - eps_star), eps_star)
+    atoms <- c(atoms, list(fw$best_theta))
+    atom_face_idx <- c(atom_face_idx, list(fw$best_fi))
+    add_atom_col(fw$best_theta)
+
+    kl <- kl_loss_and_grad(weights)$loss
+    if (n_em_iter > 0L) {
+      em_result <- run_em_step(weights, n_em_iter, kl)
+      weights <- em_result$weights
+      kl <- em_result$kl
+    }
+
     if (kl < best$kl) {
-      # Trim weights/atoms to current live set
       best <- list(
         kl = kl,
         weights = weights,
@@ -365,28 +385,32 @@ run_ripr <- function(
     }
 
     history[[atom_idx]] <- list(
-      theta_stars = lapply(face_results, `[[`, "theta"),
+      theta_star = fw$best_theta,
+      face_index = fw$best_fi,
       E_ratio = E_star,
+      eps_star = eps_star,
       kl = kl
     )
 
     if (verbose) {
       if (is.infinite(kl_prev)) {
         message(sprintf(
-          "Atom %d/%d: max_E_ratio - 1 = %e, KL = %e",
+          "Atom %d/%d: max_E_ratio - 1 = %e, KL = %e, eps* = %.4f",
           atom_idx,
-          atoms_per_face,
+          max_atoms_added,
           E_star - 1,
-          kl
+          kl,
+          eps_star
         ))
       } else {
         message(sprintf(
-          "Atom %d/%d: max_E_ratio - 1 = %e, KL = %e, delta_KL = %e",
+          "Atom %d/%d: max_E_ratio - 1 = %e, KL = %e, delta_KL = %e, eps* = %.4f",
           atom_idx,
-          atoms_per_face,
+          max_atoms_added,
           E_star - 1,
           kl,
-          kl - kl_prev
+          kl_prev - kl,
+          eps_star
         ))
       }
     }
@@ -397,18 +421,6 @@ run_ripr <- function(
     }
 
     kl_prev <- kl
-
-    if (atom_idx < atoms_per_face) {
-      new_atoms <- lapply(face_results, `[[`, "theta")
-      new_face_idx <- as.list(seq_along(face_descriptors))
-      atoms <- c(atoms, new_atoms)
-      atom_face_idx <- c(atom_face_idx, new_face_idx)
-      for (th in new_atoms) {
-        add_atom_col(th)
-      }
-      n_curr <- n_live
-      weights <- c(weights * (1 - n_faces * eps_seed), rep(eps_seed, n_faces))
-    }
   }
 
   if (converged && verbose) {

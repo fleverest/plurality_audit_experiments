@@ -22,25 +22,27 @@ box::use(
   if (tot == 0L) {
     return(0)
   }
+  log_base <- lgamma(tot + 1L) - sum(lgamma(counts + 1L))
   K <- length(counts)
   safe_loglik <- function(theta) {
     sum(ifelse(counts == 0L | theta <= 0, 0, counts * log(theta)))
   }
 
   if (counts[1L] <= max(counts[-1L])) {
-    safe_loglik(counts / tot)
+    log_base + safe_loglik(counts / tot)
   } else {
-    max(vapply(
-      2:K,
-      function(j) {
-        theta <- counts / tot
-        pj <- (counts[1L] + counts[j]) / (2 * tot)
-        theta[1L] <- pj
-        theta[j] <- pj
-        safe_loglik(theta)
-      },
-      numeric(1L)
-    ))
+    log_base +
+      max(vapply(
+        2:K,
+        function(j) {
+          theta <- counts / tot
+          pj <- (counts[1L] + counts[j]) / (2 * tot)
+          theta[1L] <- pj
+          theta[j] <- pj
+          safe_loglik(theta)
+        },
+        numeric(1L)
+      ))
   }
 }
 

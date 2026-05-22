@@ -54,51 +54,6 @@ softmax_jacobian <- function(alpha) {
   ]
 }
 
-#' Mirror descent on the probability simplex
-#'
-#' Minimises a convex loss over the probability simplex using multiplicative
-#' weights (entropic mirror descent) with a backtracking line search. The
-#' update at each step is `w_new = w * exp(-lr * grad)`, renormalised to sum
-#' to 1. The step size is halved up to 50 times until the loss decreases.
-#' Stops early when the maximum weight change drops below `tol`.
-#'
-#' @param w_init Numeric vector of initial weights (need not sum to 1;
-#'   normalised internally).
-#' @param loss_and_grad Function taking a weight vector and returning a list
-#'   with components `loss` (scalar) and `grad` (numeric vector of the same
-#'   length as `w_init`).
-#' @param max_iter Maximum number of gradient steps. Default: `1000`.
-#' @param tol Convergence tolerance on `max(|w_new - w|)`. Default: `1e-12`.
-#' @return Numeric vector of optimal weights summing to 1.
-#' @export
-mirror_descent <- function(
-  w_init,
-  loss_and_grad,
-  max_iter = 1000L,
-  tol = 1e-12
-) {
-  w <- w_init / sum(w_init)
-  for (i in seq_len(max_iter)) {
-    lr <- 1.0
-    lg <- loss_and_grad(w)
-    loss <- lg$loss
-    grad_w <- lg$grad
-    for (j in seq_len(50L)) {
-      w_new <- w * exp(-lr * grad_w)
-      w_new <- w_new / sum(w_new)
-      if (loss_and_grad(w_new)$loss <= loss) {
-        break
-      }
-      lr <- lr * 0.5
-    }
-    if (max(abs(w_new - w)) < tol) {
-      break
-    }
-    w <- w_new
-  }
-  w
-}
-
 #' Simplex lattice (integer compositions)
 #'
 #' Generates all non-negative integer vectors of length `d` that sum to `n`.

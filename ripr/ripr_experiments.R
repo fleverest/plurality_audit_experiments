@@ -1,10 +1,7 @@
 box::use(
   ripr / mixture[mixture_mnom],
   ripr /
-    plurality_geometry[
-      plurality_face_descriptors,
-      plurality_face_descriptors_unrestricted
-    ],
+    plurality_geometry[plurality_face_descriptors],
   ripr / multinomial_likelihood[make_multinomial_likelihood],
   ripr / ripr_optimiser[run_ripr]
 )
@@ -38,27 +35,22 @@ box::use(
 run_plurality_ripr <- function(
   n,
   q,
-  max_atoms_added = 50L,
+  max_atoms = 50L,
   oracle_grid = 200L,
   n_em_iter = 3L,
   kl_tol = 1e-10,
   gap_tol = 1e-10,
-  verbose = TRUE,
-  boundary = TRUE
+  verbose = TRUE
 ) {
   K <- nrow(q@atoms)
-  if (boundary) {
-    face_descriptors <- plurality_face_descriptors(K)
-  } else {
-    face_descriptors <- plurality_face_descriptors_unrestricted(K)
-  }
+  face_descriptors <- plurality_face_descriptors(K)
   likelihood <- make_multinomial_likelihood(n, K)
 
   result <- run_ripr(
     face_descriptors = face_descriptors,
     likelihood = likelihood,
     q = q,
-    max_atoms_added = max_atoms_added,
+    max_atoms = max_atoms,
     oracle_grid = oracle_grid,
     n_em_iter = n_em_iter,
     kl_tol = kl_tol,
@@ -72,7 +64,8 @@ run_plurality_ripr <- function(
       weights = result$weights,
       n = n
     ),
-    history = result$history,
+    history = result$outer_history,
+    kl_trace = result$kl_trace,
     E_star = result$E_star,
     converged = result$converged
   )

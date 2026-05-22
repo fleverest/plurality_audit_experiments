@@ -94,36 +94,3 @@ plurality_face_descriptors <- function(K) {
     )
   })
 }
-
-
-# Vertices of unrestricted null polytope j: pure-pair + standard basis vectors e_k for k != 1.
-polytope_vertices_unrestricted <- function(j, K) {
-  vertices <- list()
-  # Pure-pair vertex
-  v <- numeric(K)
-  v[1L] <- 1 / 2
-  v[j] <- 1 / 2
-  vertices[[1L]] <- v
-  # Standard basis vectors e_k for k = 2, ..., K
-  for (k in 2L:K) {
-    v <- numeric(K)
-    v[k] <- 1
-    vertices[[length(vertices) + 1L]] <- v
-  }
-  do.call(cbind, vertices) # K x K matrix
-}
-
-#' @export
-plurality_face_descriptors_unrestricted <- function(K) {
-  lapply(2L:K, function(j) {
-    V <- polytope_vertices_unrestricted(j, K)
-    list(
-      parametrise = function(alpha) as.vector(V %*% alpha),
-      parametrise_batch = function(alpha_mat) V %*% t(alpha_mat),
-      jacobian = function() V,
-      n_vertices = ncol(V),
-      init_point = function(q) project_to_face(j, q),
-      face_index = j
-    )
-  })
-}

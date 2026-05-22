@@ -6,8 +6,7 @@ box::use(
       plurality_face_descriptors_unrestricted
     ],
   ripr / multinomial_likelihood[make_multinomial_likelihood],
-  ripr / ripr_optimiser[run_ripr],
-  ripr / ripr_em[run_em]
+  ripr / ripr_optimiser[run_ripr]
 )
 
 #' RIPr optimiser for K-candidate plurality audits (multinomial)

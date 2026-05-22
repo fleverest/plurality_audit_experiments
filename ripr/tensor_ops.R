@@ -33,22 +33,6 @@ matmul_0_ninf <- function(A, B) {
   result
 }
 
-#' Element-wise addition treating -Inf + x as -Inf
-#'
-#' Prevents log-space underflow from being silently cancelled when adding a
-#' finite correction to a -Inf log-probability.
-#'
-#' @param A First tensor. Positions where `A` is -Inf remain -Inf in output.
-#' @param B Second tensor.
-#' @return Tensor equal to `A + B` except where `A` is -Inf.
-#' @export
-add_ninf_any <- function(A, B) {
-  A_ninf <- torch_isneginf(A)
-  result <- A + B
-  result$masked_fill_(A_ninf, -Inf)
-  result
-}
-
 #' In-place element-wise addition treating -Inf + x as -Inf
 #'
 #' Fills `out` with `A + B`, masking positions where `A` is -Inf back to -Inf.

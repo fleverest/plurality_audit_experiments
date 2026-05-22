@@ -3,7 +3,7 @@ library(crew.cluster)
 
 box::use(
   ripr / mixture[point_mnom, dirichlet_mnom],
-  ripr / grids[simplex_lattice],
+  ripr / simplex_utils[simplex_lattice],
   ripr / ripr_experiments[run_plurality_ripr],
   # These S7 modules aren't working for some reason.
   #  grand_prix / ui_mart[UITest],
@@ -128,8 +128,8 @@ list(
       result <- run_plurality_ripr(
         n = n,
         q = q_opt$Q,
-        max_atoms_added = 10L,
-        n_em_iter = 100L,
+        max_atoms_added = 50L,
+        n_em_iter = 25L,
         verbose = TRUE
       )
       list(

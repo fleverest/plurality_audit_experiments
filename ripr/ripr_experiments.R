@@ -24,8 +24,6 @@ box::use(
 #'   lattice points per face ~ `oracle_grid^(n_vertices - 1)`. Default: 200.
 #' @param n_em_iter Integer. Maximum EM refinement iterations per Frank-Wolfe
 #'   step. EM stops early when the KL decrease drops below `tol`. Default: 3.
-#' @param tol Numeric. Convergence tolerance: stop when
-#'   `max_theta E_theta[Q/P_W] <= 1 + tol`. Default: `1e-4`.
 #' @param verbose Logical. Print per-iteration progress. Default: `TRUE`.
 #' @return List with:
 #'   - `mixture`: a `mixture_mnom` with atoms on the null boundary.
@@ -38,8 +36,6 @@ run_plurality_ripr <- function(
   max_atoms = 50L,
   oracle_grid = 200L,
   n_em_iter = 3L,
-  kl_tol = 1e-10,
-  gap_tol = 1e-10,
   verbose = TRUE
 ) {
   K <- nrow(q@atoms)
@@ -53,8 +49,6 @@ run_plurality_ripr <- function(
     max_atoms = max_atoms,
     oracle_grid = oracle_grid,
     n_em_iter = n_em_iter,
-    kl_tol = kl_tol,
-    gap_tol = gap_tol,
     verbose = verbose
   )
 

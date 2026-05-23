@@ -372,7 +372,7 @@ run_em_step <- function(
     weights <- new_weights
     kl_new <- workspace$kl_loss_and_grad(weights)$loss
     kl_trace <- c(kl_trace, kl_new)
-    if (kl - kl_new < kl_tol) {
+    if (kl_new > kl - kl_tol) {
       break
     }
     kl <- kl_new
@@ -400,8 +400,8 @@ run_em_step <- function(
 #'   Must be at least K-1. Default 50.
 #' @param oracle_grid Grid density for per-face oracle. Default 200.
 #' @param n_em_iter Max EM iterations per outer step. Default 3.
-#' @param kl_tol Convergence tolerance on KL divergence. Default 1e-10.
-#' @param gap_tol Convergence tolerance on the FW duality gap. Default 1e-10.
+#' @param kl_tol Convergence tolerance on KL divergence. Default 1e-8.
+#' @param gap_tol Convergence tolerance on the FW gap. Default 1e-6.
 #' @param verbose Print progress. Default TRUE.
 #' @return List with:
 #'   - `atoms`: list of atom theta vectors.
@@ -423,8 +423,8 @@ run_ripr <- function(
   max_atoms = 50L,
   oracle_grid = 200L,
   n_em_iter = 3L,
-  kl_tol = 1e-10,
-  gap_tol = 1e-10,
+  kl_tol = 1e-8,
+  gap_tol = 1e-6,
   verbose = TRUE
 ) {
   n_faces <- length(face_descriptors)

@@ -1,6 +1,5 @@
 box::use(
-  ripr / mixture[mixture_mnom],
-  grand_prix / martingale_utils[log_mixture_mass],
+  ripr / mixture[simplex_mixture, log_pmf],
   S7[new_class, new_object, method, `method<-`, class_numeric, S7_object],
   seqan[
     Test,
@@ -52,7 +51,7 @@ box::use(
 #
 # E_t^UI = Q(X^t) / sup_{θ ∈ H_0} p_θ(X^t)
 #
-# Q is a mixture_mnom (use point_mnom for the standard point-alternative case).
+# Q is a simplex_mixture (use point_mnom for the standard point-alternative case).
 # The numerator Q(X^t) is the mixture-multinomial mass at the cumulative counts.
 # The denominator is the restricted-MLE likelihood over the joint sample.
 
@@ -62,7 +61,7 @@ box::use(
 #' where Q is a mixture-multinomial alternative and the denominator is the
 #' restricted-MLE likelihood. Valid for any stopping time.
 #'
-#' @param Q A `mixture_mnom` alternative. Use [point_mnom()] for a single
+#' @param Q A `simplex_mixture` alternative. Use [point_mnom()] for a single
 #'   point alternative or [dirichlet_mnom()] for a grid-weighted Dirichlet
 #'   prior.
 #' @param alpha Numeric. Significance level; rejection when E_t >= 1/alpha.
@@ -75,7 +74,7 @@ UITest <- new_class(
   "UITest",
   parent = Test,
   properties = list(
-    Q = mixture_mnom,
+    Q = simplex_mixture,
     alpha = class_numeric
   ),
   constructor = function(Q, alpha = 0.05, stream = NULL) {
@@ -105,7 +104,6 @@ UITest <- new_class(
   }
 )
 
-#' @export
 method(update, UITest) <- function(stat, new_x = NULL, ...) {
   if (is_stopped(stat)) {
     message("UITest has already stopped. Use reset() to restart.")
@@ -127,7 +125,7 @@ method(update, UITest) <- function(stat, new_x = NULL, ...) {
   for (i in seq_along(new_x)) {
     x <- new_x[i]
     stat@state$counts[x] <- stat@state$counts[x] + 1L
-    log_Q <- log_mixture_mass(stat@state$counts, stat@Q)
+    log_Q <- log_pmf(stat@Q, stat@state$counts)
     log_rmle <- .rmle_log_lik(stat@state$counts)
     new_e[i] <- exp(log_Q - log_rmle)
   }
@@ -147,7 +145,6 @@ method(update, UITest) <- function(stat, new_x = NULL, ...) {
   invisible(stat)
 }
 
-#' @export
 method(reset, UITest) <- function(object, ...) {
   object@state$counts <- integer(nrow(object@Q@atoms))
   object@state$history <- 1
@@ -160,21 +157,15 @@ method(reset, UITest) <- function(object, ...) {
   invisible(object)
 }
 
-#' @export
 method(is_stopped, UITest) <- function(stat, ...) decision(stat) != "continue"
-#' @export
 method(decision, UITest) <- function(test, ...) test@state$decision
-#' @export
 method(n_obs, UITest) <- function(stat, ...) stat@state$n
-#' @export
 method(stopping_time, UITest) <- function(test, ...) test@state$stop_time
 
-#' @export
 method(value, UITest) <- function(stat, n = 1L, ...) {
   tail(stat@state$history, n = n)
 }
 
-#' @export
 method(print, UITest) <- function(x, ...) {
   K <- nrow(x@Q@atoms)
   cat(sprintf("Universal Inference e-process (%d-candidate plurality)\n", K))

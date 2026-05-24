@@ -1,6 +1,5 @@
 box::use(
-  ripr / mixture[mixture_mnom],
-  grand_prix / martingale_utils[log_mixture_mass],
+  ripr / mixture[simplex_mixture, log_pmf],
   S7[
     new_class,
     new_object,
@@ -23,11 +22,10 @@ box::use(
   ]
 )
 
-# log Y_t(counts) = log Q(counts) - log P_W(counts) for two mixture_mnom objects.
+# log Y_t(counts) = log Q(counts) - log P_W(counts) for two simplex_mixture objects.
 .log_Y <- function(counts, Q, P_W) {
-  log_mixture_mass(counts, Q) - log_mixture_mass(counts, P_W)
+  log_pmf(Q, counts) - log_pmf(P_W, counts)
 }
-
 
 # ---------------------------------------------------------------------------
 # RIPrSequence — uncorrected RIPr e-variable sequence (not a martingale)
@@ -45,9 +43,9 @@ box::use(
 #' [DirectRIPrSequenceTest()], no correction factor is applied, so this
 #' sequence is not a valid e-process.
 #'
-#' @param Q A `mixture_mnom` alternative.
+#' @param Q A `simplex_mixture` alternative.
 #' @param ripr_fn Function of signature `function(n)` returning
-#'   `list(mixture = mixture_mnom, e_ratio = numeric)`.
+#'   `list(mixture = simplex_mixture, e_ratio = numeric)`.
 #' @param alpha Numeric. Significance level for the stopping threshold.
 #'   Default: 0.05.
 #' @param stream Optional stream object.
@@ -57,7 +55,7 @@ RIPrSequence <- new_class(
   "RIPrSequence",
   parent = Test,
   properties = list(
-    Q = mixture_mnom,
+    Q = simplex_mixture,
     alpha = class_numeric,
     ripr_fn = class_any
   ),
@@ -93,7 +91,6 @@ RIPrSequence <- new_class(
   }
 )
 
-#' @export
 method(update, RIPrSequence) <- function(stat, new_x = NULL, ...) {
   if (is_stopped(stat)) {
     message("RIPrSequence has already stopped. Use reset() to restart.")
@@ -135,7 +132,6 @@ method(update, RIPrSequence) <- function(stat, new_x = NULL, ...) {
   invisible(stat)
 }
 
-#' @export
 method(reset, RIPrSequence) <- function(object, ...) {
   object@state$counts <- integer(nrow(object@Q@atoms))
   object@state$log_Y <- 0
@@ -149,21 +145,15 @@ method(reset, RIPrSequence) <- function(object, ...) {
   invisible(object)
 }
 
-#' @export
 method(is_stopped, RIPrSequence) <- function(stat, ...) {
   decision(stat) != "continue"
 }
-#' @export
 method(decision, RIPrSequence) <- function(test, ...) test@state$decision
-#' @export
 method(n_obs, RIPrSequence) <- function(stat, ...) stat@state$n
-#' @export
 method(stopping_time, RIPrSequence) <- function(test, ...) test@state$stop_time
-#' @export
 method(value, RIPrSequence) <- function(stat, n = 1L, ...) {
   tail(stat@state$history, n = n)
 }
-#' @export
 method(print, RIPrSequence) <- function(x, ...) {
   K <- nrow(x@Q@atoms)
   cat(sprintf("RIPr sequence (uncorrected, %d-candidate plurality)\n", K))
@@ -210,9 +200,9 @@ method(print, RIPrSequence) <- function(x, ...) {
 #' where Y_t = Q(X^t) / P_W^t(X^t) is the uncorrected e-variable (accessible via
 #' `x@inner`) and a_t is the accumulated correction factor.
 #'
-#' @param Q A `mixture_mnom` alternative. Use [point_mnom()] or [dirichlet_mnom()].
+#' @param Q A `simplex_mixture` alternative. Use [point_mnom()] or [dirichlet_mnom()].
 #' @param ripr_fn Function of signature `function(n)` returning
-#'   `list(mixture = mixture_mnom, e_ratio = numeric)`.
+#'   `list(mixture = simplex_mixture, e_ratio = numeric)`.
 #' @param alpha Numeric. Significance level. Default: 0.05.
 #' @param stream Optional stream object.
 #' @return A `CorrectedRIPrSequence` object.
@@ -252,7 +242,6 @@ CorrectedRIPrSequence <- new_class(
   }
 )
 
-#' @export
 method(update, CorrectedRIPrSequence) <- function(stat, new_x = NULL, ...) {
   if (is_stopped(stat)) {
     message(
@@ -313,7 +302,6 @@ method(update, CorrectedRIPrSequence) <- function(stat, new_x = NULL, ...) {
   invisible(stat)
 }
 
-#' @export
 method(reset, CorrectedRIPrSequence) <- function(object, ...) {
   reset(object@inner)
   object@state$log_a <- 0
@@ -328,25 +316,19 @@ method(reset, CorrectedRIPrSequence) <- function(object, ...) {
   invisible(object)
 }
 
-#' @export
 method(is_stopped, CorrectedRIPrSequence) <- function(stat, ...) {
   decision(stat) != "continue"
 }
-#' @export
 method(decision, CorrectedRIPrSequence) <- function(test, ...) {
   test@state$decision
 }
-#' @export
 method(n_obs, CorrectedRIPrSequence) <- function(stat, ...) stat@state$n
-#' @export
 method(stopping_time, CorrectedRIPrSequence) <- function(test, ...) {
   test@state$stop_time
 }
-#' @export
 method(value, CorrectedRIPrSequence) <- function(stat, n = 1L, ...) {
   tail(stat@state$history_Z, n = n)
 }
-#' @export
 method(print, CorrectedRIPrSequence) <- function(x, ...) {
   K <- nrow(x@inner@Q@atoms)
   cat(sprintf(
@@ -373,11 +355,11 @@ method(print, CorrectedRIPrSequence) <- function(x, ...) {
 # ---------------------------------------------------------------------------
 #
 # E_k = Q(c_k) / P_W(c_k) / e_ratio
-# where Q is the alternative mixture_mnom (numerator), P_W is the boundary-
-# optimal mixture_mnom from run_plurality_ripr (denominator), and e_ratio =
+# where Q is the alternative simplex_mixture (numerator), P_W is the boundary-
+# optimal simplex_mixture from run_plurality_ripr (denominator), and e_ratio =
 # max_theta E_theta[Q/P_W] guarantees E_theta[E_k] <= 1 for all theta in H_0.
 #
-# Both point and Dirichlet mixture alternatives are supported via mixture_mnom.
+# Both point and Dirichlet mixture alternatives are supported via simplex_mixture.
 
 #' Batch RIPr test martingale for K-candidate plurality
 #'
@@ -387,9 +369,9 @@ method(print, CorrectedRIPrSequence) <- function(x, ...) {
 #' duality gap from [run_plurality_ripr()]) ensures E_theta[E_k] <= 1 for all
 #' theta in H_0. Supports both point and Dirichlet mixture alternatives.
 #'
-#' @param Q A `mixture_mnom` alternative (numerator). Use [point_mnom()] or
+#' @param Q A `simplex_mixture` alternative (numerator). Use [point_mnom()] or
 #'   [dirichlet_mnom()].
-#' @param P_W A `mixture_mnom` with `@n` set to the batch size (denominator).
+#' @param P_W A `simplex_mixture` with `@n` set to the batch size (denominator).
 #'   Typically the `mixture` component of [run_plurality_ripr()] output.
 #' @param e_ratio Numeric. Duality gap (`E_star`) from [run_plurality_ripr()].
 #' @param alpha Numeric. Significance level. Default: 0.05.
@@ -400,8 +382,8 @@ BatchRIPr <- new_class(
   "BatchRIPr",
   parent = Test,
   properties = list(
-    Q = mixture_mnom,
-    P_W = mixture_mnom,
+    Q = simplex_mixture,
+    P_W = simplex_mixture,
     batch_size = class_integer,
     alpha = class_numeric
   ),
@@ -441,7 +423,6 @@ BatchRIPr <- new_class(
   }
 )
 
-#' @export
 method(update, BatchRIPr) <- function(stat, new_x = NULL, ...) {
   if (is_stopped(stat)) {
     message("BatchRIPr has already stopped. Use reset() to restart.")
@@ -489,7 +470,6 @@ method(update, BatchRIPr) <- function(stat, new_x = NULL, ...) {
   invisible(stat)
 }
 
-#' @export
 method(reset, BatchRIPr) <- function(object, ...) {
   object@state$batch_counts <- integer(nrow(object@Q@atoms))
   object@state$log_m <- 0
@@ -503,23 +483,17 @@ method(reset, BatchRIPr) <- function(object, ...) {
   invisible(object)
 }
 
-#' @export
 method(is_stopped, BatchRIPr) <- function(stat, ...) {
   decision(stat) != "continue"
 }
-#' @export
 method(decision, BatchRIPr) <- function(test, ...) test@state$decision
-#' @export
 method(n_obs, BatchRIPr) <- function(stat, ...) stat@state$n
-#' @export
 method(stopping_time, BatchRIPr) <- function(test, ...) test@state$stop_time
 
-#' @export
 method(value, BatchRIPr) <- function(stat, n = 1L, ...) {
   tail(stat@state$history, n = n)
 }
 
-#' @export
 method(print, BatchRIPr) <- function(x, ...) {
   K <- nrow(x@Q@atoms)
   cat(sprintf(

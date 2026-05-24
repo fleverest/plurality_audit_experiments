@@ -1,5 +1,5 @@
 box::use(
-  ripr / mixture[mixture_mnom],
+  ripr / mixture[simplex_mixture],
   S7[new_class, new_object, method, `method<-`, class_numeric, S7_object],
   seqan[
     Test,
@@ -88,7 +88,6 @@ PairwiseMartingale <- new_class(
   }
 )
 
-#' @export
 method(update, PairwiseMartingale) <- function(stat, new_x = NULL, ...) {
   if (is_stopped(stat)) {
     message("PairwiseMartingale has already stopped. Use reset() to restart.")
@@ -128,7 +127,6 @@ method(update, PairwiseMartingale) <- function(stat, new_x = NULL, ...) {
   invisible(stat)
 }
 
-#' @export
 method(reset, PairwiseMartingale) <- function(object, ...) {
   object@state$log_m <- 0
   object@state$history <- 1
@@ -141,25 +139,19 @@ method(reset, PairwiseMartingale) <- function(object, ...) {
   invisible(object)
 }
 
-#' @export
 method(is_stopped, PairwiseMartingale) <- function(stat, ...) {
   decision(stat) != "continue"
 }
-#' @export
 method(decision, PairwiseMartingale) <- function(test, ...) test@state$decision
-#' @export
 method(n_obs, PairwiseMartingale) <- function(stat, ...) stat@state$n
-#' @export
 method(stopping_time, PairwiseMartingale) <- function(test, ...) {
   test@state$stop_time
 }
 
-#' @export
 method(value, PairwiseMartingale) <- function(stat, n = 1L, ...) {
   tail(stat@state$history, n = n)
 }
 
-#' @export
 method(print, PairwiseMartingale) <- function(x, ...) {
   cat(sprintf("Pairwise RIPr martingale (candidate 1 vs %d)\n", x@competitor))
   cat("q:    ", x@q, "\n")
@@ -207,7 +199,7 @@ method(print, PairwiseMartingale) <- function(x, ...) {
 #' all k > 1 and j). This is satisfied by the filtered simplex-lattice
 #' Dirichlet mixtures constructed in `_targets.R`.
 #'
-#' @param Q A `mixture_mnom`. Use [point_mnom()] or [dirichlet_mnom()].
+#' @param Q A `simplex_mixture`. Use [point_mnom()] or [dirichlet_mnom()].
 #' @param alpha Numeric. Significance level. Default: 0.05.
 #' @param stream Optional stream object.
 #' @return An `InfimumMartingale` object.
@@ -216,7 +208,7 @@ InfimumMartingale <- new_class(
   "InfimumMartingale",
   parent = Test,
   properties = list(
-    Q = mixture_mnom,
+    Q = simplex_mixture,
     alpha = class_numeric
   ),
   constructor = function(Q, alpha = 0.05, stream = NULL) {
@@ -267,7 +259,6 @@ InfimumMartingale <- new_class(
   }
 )
 
-#' @export
 method(update, InfimumMartingale) <- function(stat, new_x = NULL, ...) {
   if (is_stopped(stat)) {
     message("InfimumMartingale has already stopped. Use reset() to restart.")
@@ -318,7 +309,6 @@ method(update, InfimumMartingale) <- function(stat, new_x = NULL, ...) {
   invisible(stat)
 }
 
-#' @export
 method(reset, InfimumMartingale) <- function(object, ...) {
   d <- dim(object@state$log_incr)
   object@state$log_m <- matrix(0, nrow = d[1L], ncol = d[3L])
@@ -332,25 +322,19 @@ method(reset, InfimumMartingale) <- function(object, ...) {
   invisible(object)
 }
 
-#' @export
 method(is_stopped, InfimumMartingale) <- function(stat, ...) {
   decision(stat) != "continue"
 }
-#' @export
 method(decision, InfimumMartingale) <- function(test, ...) test@state$decision
-#' @export
 method(n_obs, InfimumMartingale) <- function(stat, ...) stat@state$n
-#' @export
 method(stopping_time, InfimumMartingale) <- function(test, ...) {
   test@state$stop_time
 }
 
-#' @export
 method(value, InfimumMartingale) <- function(stat, n = 1L, ...) {
   tail(stat@state$history, n = n)
 }
 
-#' @export
 method(print, InfimumMartingale) <- function(x, ...) {
   K <- nrow(x@Q@atoms)
   A <- ncol(x@Q@atoms)

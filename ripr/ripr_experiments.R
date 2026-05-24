@@ -1,8 +1,8 @@
 box::use(
-  ripr / mixture[mixture_mnom],
+  ripr / mixture[discrete_simplex_mixture, n_categories],
   ripr /
     plurality_geometry[plurality_face_descriptors],
-  ripr / multinomial_likelihood[make_multinomial_likelihood],
+  ripr / multinomial[make_multinomial_likelihood],
   ripr / ripr_optimiser[run_ripr]
 )
 
@@ -12,21 +12,25 @@ box::use(
 #' setting: constructs plurality null boundary face descriptors via
 #' [plurality_face_descriptors()] and a multinomial likelihood via
 #' [make_multinomial_likelihood()], runs the Frank-Wolfe + EM optimiser, and
-#' returns the result as a `mixture_mnom`.
+#' returns the result as a `discrete_simplex_mixture`.
 #'
 #' @param n Integer. Total ballot count.
-#' @param q A `mixture_mnom` — the numerator distribution Q. Use [point_mnom()]
-#'   for a single point alternative or [dirichlet_mnom()] for a grid-weighted
-#'   Dirichlet prior. `K` is inferred from `nrow(q@atoms)`.
+#' @param q A `simplex_mixture` — the numerator distribution Q. `K` is inferred
+#'   from `n_categories(q)`.
 #' @param max_atoms_added Integer. Maximum atoms added (beyond initialisation).
 #'   Default: 50.
 #' @param oracle_grid Integer. Grid density for the per-face oracle. Total
 #'   lattice points per face ~ `oracle_grid^(n_vertices - 1)`. Default: 200.
-#' @param n_em_iter Integer. Maximum EM refinement iterations per Frank-Wolfe
-#'   step. EM stops early when the KL decrease drops below `tol`. Default: 3.
+#' @param kl_atol Absolute tolerance for EM convergence. Default 1e-12.
+#' @param kl_rtol Relative tolerance for EM convergence. Default 1e-6.
+#' @param gap_tol Numeric. Outer loop stops when the expected likelihood ratio
+#' falls below this threshold (plus 1L). Default: 1e-6.
+#' @param em_iters Integer. Maximum EM refinement iterations per Frank-Wolfe
+#'   step. EM stops early when the KL decrease drops below
+#'   `kl_atol` + `kl_rtol * abs(KL)`. Default: 3.
 #' @param verbose Logical. Print per-iteration progress. Default: `TRUE`.
 #' @return List with:
-#'   - `mixture`: a `mixture_mnom` with atoms on the null boundary.
+#'   - `mixture`: a `discrete_simplex_mixture` with atoms on the null boundary.
 #'   - `history`: list of per-iteration info (`theta_stars`, `E_ratio`, `kl`).
 #'   - `converged`: `TRUE` if the validity condition was met.
 #' @export
@@ -35,10 +39,13 @@ run_plurality_ripr <- function(
   q,
   max_atoms = 50L,
   oracle_grid = 200L,
-  n_em_iter = 3L,
+  em_iters = 3L,
+  kl_atol = 1e-12,
+  kl_rtol = 1e-6,
+  gap_tol = 1e-6,
   verbose = TRUE
 ) {
-  K <- nrow(q@atoms)
+  K <- n_categories(q)
   face_descriptors <- plurality_face_descriptors(K)
   likelihood <- make_multinomial_likelihood(n, K)
 
@@ -48,12 +55,15 @@ run_plurality_ripr <- function(
     q = q,
     max_atoms = max_atoms,
     oracle_grid = oracle_grid,
-    n_em_iter = n_em_iter,
+    em_iters = em_iters,
+    kl_atol = kl_atol,
+    kl_rtol = kl_rtol,
+    gap_tol = gap_tol,
     verbose = verbose
   )
 
   list(
-    mixture = mixture_mnom(
+    mixture = discrete_simplex_mixture(
       atoms = do.call(cbind, result$atoms),
       weights = result$weights,
       n = n

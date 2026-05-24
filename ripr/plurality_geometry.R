@@ -68,8 +68,10 @@ face_vertices <- function(j, K) {
 #'     point `theta` on the face via the convex combination of vertices.}
 #'   \item{`parametrise_batch(alpha_mat)`}{Batched version: `alpha_mat` is an
 #'     `N x n_vertices` matrix; returns a `K x N` matrix of theta vectors.}
-#'   \item{`jacobian()`}{Returns the `K x n_vertices` vertex matrix — the
+#'   \item{`jacobian`}{The `K x n_vertices` vertex matrix, i.e the
 #'     constant Jacobian of `parametrise` with respect to `alpha`.}
+#'   \item{`pinv`}{The `n_vertices x K` left pseudo-inverse of the Jacobian, for
+#'    mapping gradients in `theta` space back to `alpha` space.}
 #'   \item{`n_vertices`}{Integer. Number of vertices (`2^{K-2}`).}
 #'   \item{`init_point(q)`}{Returns an initial atom on this face by projecting
 #'     the point `q` onto the face via [project_to_face()].}
@@ -84,10 +86,16 @@ face_vertices <- function(j, K) {
 plurality_face_descriptors <- function(K) {
   lapply(2L:K, function(j) {
     V <- face_vertices(j, K)
+    svd_V <- svd(V)
+    tol <- max(dim(V)) * .Machine$double.eps * max(svd_V$d)
+    pos <- svd_V$d > tol
+    V_pinv <- svd_V$v[, pos, drop = FALSE] %*%
+      (t(svd_V$u[, pos, drop = FALSE]) / svd_V$d[pos])
     list(
       parametrise = function(alpha) as.vector(V %*% alpha),
       parametrise_batch = function(alpha_mat) V %*% t(alpha_mat),
-      jacobian = function() V,
+      jacobian = V,
+      pinv = V_pinv,
       n_vertices = ncol(V),
       init_point = function(q) project_to_face(j, q),
       face_index = j

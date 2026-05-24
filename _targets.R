@@ -2,13 +2,12 @@ library(targets)
 library(crew.cluster)
 
 box::use(
-  ripr / mixture[point_mnom, dirichlet_mnom],
+  ripr / mixture[discrete_simplex_mixture, truncated_dirichlet],
   ripr / simplex_utils[simplex_lattice],
   ripr / ripr_experiments[run_plurality_ripr],
-  # These S7 modules aren't working for some reason.
-  #  grand_prix / ui_mart[UITest],
-  #  grand_prix / im_mart[InfimumMartingale],
-  #  grand_prix / ripr_mart[BatchRIPr]
+  # grand_prix / ui_mart[UITest],
+  # grand_prix / im_mart[InfimumMartingale],
+  # grand_prix / ripr_mart[BatchRIPr],
   grand_prix / martingale_sequences[run_martingale],
   grand_prix / plot_utils[build_sim_long, plot_mean_martingales]
 )
@@ -74,42 +73,48 @@ list(
       list(
         name = "point_754",
         K = 3L,
-        Q = point_mnom(q = c(7 / 16, 5 / 16, 4 / 16))
+        Q = discrete_simplex_mixture(as.matrix(c(7 / 16, 5 / 16, 4 / 16)), 1)
       ),
       list(
         name = "dirichlet_754",
         K = 3L,
-        Q = dirichlet_mnom(alpha = c(7, 5, 4), atoms = simplex_k3_alt)
+        Q = truncated_dirichlet(c(7, 5, 4))
       ),
       list(
         name = "point_855",
         K = 3L,
-        Q = point_mnom(q = c(8 / 18, 5 / 18, 5 / 18))
+        Q = discrete_simplex_mixture(as.matrix(c(8 / 18, 5 / 18, 5 / 18)), 1)
       ),
       list(
         name = "dirichlet_855",
         K = 3L,
-        Q = dirichlet_mnom(alpha = c(8, 5, 5), atoms = simplex_k3_alt)
+        Q = truncated_dirichlet(c(8, 5, 5))
       ),
       list(
         name = "point_7531",
         K = 4L,
-        Q = point_mnom(q = c(7 / 16, 5 / 16, 3 / 16, 1 / 16))
+        Q = discrete_simplex_mixture(
+          as.matrix(c(7 / 16, 5 / 16, 3 / 16, 1 / 16)),
+          1
+        )
       ),
       list(
         name = "dirichlet_7531",
         K = 4L,
-        Q = dirichlet_mnom(alpha = c(7, 5, 3, 1), atoms = simplex_k4_alt)
+        Q = truncated_dirichlet(c(7, 5, 3, 1))
       ),
       list(
         name = "point_8444",
         K = 4L,
-        Q = point_mnom(q = c(8 / 20, 4 / 20, 4 / 20, 4 / 20))
+        Q = discrete_simplex_mixture(
+          as.matrix(c(8 / 20, 4 / 20, 4 / 20, 4 / 20)),
+          1
+        )
       ),
       list(
         name = "dirichlet_8444",
         K = 4L,
-        Q = dirichlet_mnom(alpha = c(8, 4, 4, 4), atoms = simplex_k4_alt)
+        Q = truncated_dirichlet(c(8, 4, 4, 4))
       )
     )
   ),
@@ -128,8 +133,8 @@ list(
       result <- run_plurality_ripr(
         n = n,
         q = q_opt$Q,
-        max_atoms_added = 50L,
-        n_em_iter = 25L,
+        max_atoms_added = 10L,
+        n_em_iter = 100L,
         verbose = TRUE
       )
       list(

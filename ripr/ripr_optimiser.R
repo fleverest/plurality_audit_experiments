@@ -7,7 +7,7 @@ box::use(
   ],
   ripr / torch_settings[device, dtype],
   ripr / tensor_ops[add_ninf_any_, logsumexp_inplace_],
-  ripr / mixture[log_pmf],
+  ripr / mixture[log_pmf, n_categories],
   ripr /
     simplex_utils[
       alpha_from_v,
@@ -35,6 +35,7 @@ weighted_score_sum <- function(weights_x, score_gpu) {
 }
 
 #' E_theta[Q / P_w] (the Frank-Wolfe objective value)
+#' @export
 e_ratio <- function(log_tm_gpu, log_q_mass_gpu, log_Pw_gpu) {
   log_terms <- (log_tm_gpu + log_q_mass_gpu - log_Pw_gpu)$nan_to_num(nan = -Inf)
   torch_logsumexp(log_terms, dim = 1L)$exp()$item()
@@ -58,14 +59,38 @@ e_ratio_grad_theta <- function(
 #' `obj_and_grad(v)` is the BFGS objective in the unconstrained softmax
 #' parametrisation `v`. `obj_grid_eval(alpha_mat)` evaluates the negative
 #' objective at a batch of simplex points (used to pick BFGS seeds).
+#' `oracle_grid` controls the density of the simplex lattice used for seed selection.
+#' `seed_alpha` can be set to skip the global search and just run BFGS from a
+#' single initial point.
 optimise_on_face <- function(
   fd,
   obj_and_grad,
   obj_grid_eval,
-  oracle_grid,
-  n_restarts = 5L
+  oracle_grid = NULL,
+  n_restarts = 25L,
+  seed_alpha = NULL
 ) {
   n_vertices <- fd$n_vertices
+
+  # Local-mode early return
+  if (!is.null(seed_alpha)) {
+    init_alpha <- pmax(seed_alpha, 1e-8)
+    init_alpha <- init_alpha / sum(init_alpha)
+    res <- tryCatch(
+      stats::optim(
+        v_from_alpha(init_alpha),
+        fn = function(v) obj_and_grad(v)$value,
+        gr = function(v) obj_and_grad(v)$gradient,
+        method = "BFGS"
+      ),
+      error = function(e) {
+        list(par = v_from_alpha(init_alpha), value = Inf)
+      }
+    )
+    return(list(alpha_star = alpha_from_v(res$par), neg_value = res$value))
+  }
+
+  # Original global-mode body, unchanged:
   lat_density <- max(3L, round(oracle_grid^(1 / max(1L, n_vertices - 1L))))
   alpha_mat <- simplex_lattice(n_vertices, lat_density) / lat_density
 
@@ -101,14 +126,24 @@ optimise_on_face <- function(
 #' Handles the softmax + face-parametrisation chain rule so callers only
 #' supply the pointwise value and theta-gradient.
 make_face_objective <- function(fd, value_fn, grad_theta_fn) {
-  J <- fd$jacobian()
+  J <- fd$jacobian
+
+  # Cache last input output pair for potential reuse since optim calls fn and gr separately.
+  last_v <- NULL
+  last_result <- NULL
   function(v) {
+    if (!is.null(last_v) && identical(v, last_v)) {
+      return(last_result)
+    }
     alpha <- alpha_from_v(v)
     theta <- fd$parametrise(alpha)
     val <- value_fn(theta)
     grad_theta <- grad_theta_fn(theta)
     grad_v <- as.vector(grad_theta %*% J %*% softmax_jacobian(alpha))
-    list(value = -val, gradient = -grad_v)
+
+    last_v <<- v
+    last_result <<- list(value = -val, gradient = -grad_v)
+    last_result
   }
 }
 
@@ -142,7 +177,12 @@ fw_oracle_face <- function(
     as.numeric(torch_logsumexp(log_terms, dim = 1L)$exp()$cpu())
   }
 
-  res <- optimise_on_face(fd, obj_and_grad, obj_grid_eval, oracle_grid)
+  res <- optimise_on_face(
+    fd,
+    obj_and_grad,
+    obj_grid_eval,
+    oracle_grid = oracle_grid
+  )
   list(theta = fd$parametrise(res$alpha_star), E_ratio = -res$neg_value)
 }
 
@@ -175,7 +215,7 @@ em_mstep_face <- function(
   log_r_k,
   likelihood,
   log_q_mass_gpu,
-  oracle_grid
+  seed_alpha
 ) {
   log_weights <- log_q_mass_gpu + log_r_k
   weights_x <- log_weights$exp()$nan_to_num(nan = 0.0)
@@ -200,7 +240,12 @@ em_mstep_face <- function(
     )
   }
 
-  res <- optimise_on_face(fd, obj_and_grad, obj_grid_eval, oracle_grid)
+  res <- optimise_on_face(
+    fd,
+    obj_and_grad,
+    obj_grid_eval,
+    seed_alpha = seed_alpha
+  )
   list(
     theta = fd$parametrise(res$alpha_star),
     obj = -res$neg_value,
@@ -240,6 +285,9 @@ make_ripr_workspace <- function(likelihood, q, max_atoms) {
   finite_q_gpu <- q_mass_gpu > 0
   q_mass_f_gpu <- q_mass_gpu[finite_q_gpu]
   M_f <- q_mass_f_gpu$numel()
+  H_Q <- -(q_mass_f_gpu * log_q_mass_gpu[finite_q_gpu])$nan_to_num(
+    nan = 0
+  )$sum()$item()
 
   lc <- torch_full(c(M, max_atoms), -Inf, device = device, dtype = dtype)
   lc_f <- torch_full(c(M_f, max_atoms), -Inf, device = device, dtype = dtype)
@@ -290,7 +338,8 @@ make_ripr_workspace <- function(likelihood, q, max_atoms) {
     buf_f_live$mul_(q_mass_f_gpu$unsqueeze(2L))
 
     list(
-      loss = -(q_mass_f_gpu * log_Pw_f)$nan_to_num_(nan = 0.0)$sum()$item(),
+      loss = -H_Q -
+        (q_mass_f_gpu * log_Pw_f)$nan_to_num_(nan = 0.0)$sum()$item(),
       grad = as.numeric(-buf_f_live$sum(dim = 1L)$cpu())
     )
   }
@@ -332,15 +381,16 @@ run_em_step <- function(
   atoms,
   atom_face_idx,
   oracle_grid,
-  n_em_iter,
-  kl_tol,
+  em_iters,
+  kl_atol,
+  kl_rtol,
   kl_init
 ) {
   kl <- kl_init
   n_live <- workspace$n_live()
   kl_trace <- numeric(0L) # KL after each EM iteration actually run
 
-  for (em_idx in seq_len(n_em_iter)) {
+  for (em_idx in seq_len(em_iters)) {
     log_Pw_gpu <- workspace$compute_log_Pw_gpu(weights)
     log_r <- workspace$compute_responsibilities(log_Pw_gpu, weights)
 
@@ -352,12 +402,16 @@ run_em_step <- function(
 
     for (k in seq_len(n_live)) {
       fd_k <- face_descriptors[[atom_face_idx[k]]]
+      # Recover current atom's alpha via pseudo-inverse, clip + renormalise for FP safety
+      seed_alpha_k <- as.vector(fd_k$pinv %*% atoms[[k]])
+      seed_alpha_k <- pmax(seed_alpha_k, 0)
+      seed_alpha_k <- seed_alpha_k / sum(seed_alpha_k)
       result <- em_mstep_face(
         fd_k,
         log_r[, k],
         likelihood,
         workspace$log_q_mass_gpu,
-        oracle_grid
+        seed_alpha_k
       )
 
       old_ll <- (result$weights_x * workspace$lc_col(k))$nan_to_num(
@@ -372,7 +426,7 @@ run_em_step <- function(
     weights <- new_weights
     kl_new <- workspace$kl_loss_and_grad(weights)$loss
     kl_trace <- c(kl_trace, kl_new)
-    if (kl_new > kl - kl_tol) {
+    if (kl - kl_new < kl_atol + kl_rtol * abs(kl)) {
       break
     }
     kl <- kl_new
@@ -395,12 +449,13 @@ run_em_step <- function(
 #' @param face_descriptors List of face descriptors. See
 #'   [plurality_face_descriptors()].
 #' @param likelihood Likelihood interface. See [make_multinomial_likelihood()].
-#' @param q A `mixture_mnom` -- the numerator distribution Q.
+#' @param q A `simplex_mixture` representing the numerator distribution Q.
 #' @param max_atoms Total budget of atoms (including the K-1 initial atoms).
 #'   Must be at least K-1. Default 50.
 #' @param oracle_grid Grid density for per-face oracle. Default 200.
-#' @param n_em_iter Max EM iterations per outer step. Default 3.
-#' @param kl_tol Convergence tolerance on KL divergence. Default 1e-8.
+#' @param em_iters Max EM iterations per outer step. Default 3.
+#' @param kl_atol Absolute tolerance for EM convergence. Default 1e-12.
+#' @param kl_rtol Relative tolerance for EM convergence. Default 1e-6
 #' @param gap_tol Convergence tolerance on the FW gap. Default 1e-6.
 #' @param verbose Print progress. Default TRUE.
 #' @return List with:
@@ -422,8 +477,9 @@ run_ripr <- function(
   q,
   max_atoms = 50L,
   oracle_grid = 200L,
-  n_em_iter = 3L,
-  kl_tol = 1e-8,
+  em_iters = 3L,
+  kl_atol = 1e-12,
+  kl_rtol = 1e-6,
   gap_tol = 1e-6,
   verbose = TRUE
 ) {
@@ -438,20 +494,9 @@ run_ripr <- function(
   max_fw_atoms <- max_atoms - n_faces
   workspace <- make_ripr_workspace(likelihood, q, max_atoms)
 
-  # --- Initialisation: one atom per face, projected from q_max ---
-  q_max <- q@atoms[, which.max(q@weights)]
-  atoms <- lapply(face_descriptors, function(fd) fd$init_point(q_max))
-  atom_face_idx <- seq_along(face_descriptors)
-  for (th in atoms) {
-    workspace$add_atom_col(th)
-  }
-
-  weights <- rep(1 / n_faces, n_faces)
-  kl <- workspace$kl_loss_and_grad(weights)$loss
-
   # --- History accumulators ---
   # Pre-allocate generously; trim at the end.
-  max_rows <- (max_fw_atoms + 1L) * (n_em_iter + 1L) + 1L
+  max_rows <- (max_fw_atoms + 1L) * (em_iters + 1L) + 1L
   trace_iter <- integer(max_rows)
   trace_type <- character(max_rows)
   trace_n_atoms <- integer(max_rows)
@@ -474,75 +519,65 @@ run_ripr <- function(
   outer_kl_after_em <- numeric(max_fw_atoms + 1L)
   outer_row <- 0L
 
-  record_trace(0L, "init", n_faces, kl)
-
   if (verbose) {
     message(sprintf(
-      "run_ripr: K=%d, M=%d outcomes, max_atoms=%d, %d faces, kl_tol=%g, gap_tol=%g",
+      "run_ripr: K=%d, M=%d outcomes, max_atoms=%d, %d faces, kl_atol=%g, kl_rtol=%g, gap_tol=%g",
       likelihood$K,
       likelihood$M,
       max_atoms,
       n_faces,
-      kl_tol,
+      kl_atol,
+      kl_rtol,
       gap_tol
     ))
-    message(sprintf("Init: %d atoms, KL = %e", n_faces, kl))
   }
-
-  # --- Run EM on the initial mixture before the first FW step ---
-  if (n_em_iter > 0L) {
-    em_result <- run_em_step(
-      workspace,
-      face_descriptors,
-      likelihood,
-      weights,
-      atoms,
-      atom_face_idx,
-      oracle_grid,
-      n_em_iter,
-      kl_tol,
-      kl
-    )
-    weights <- em_result$weights
-    atoms <- em_result$atoms
-    for (kl_em in em_result$kl_trace) {
-      record_trace(0L, "em", n_faces, kl_em)
-    }
-    kl <- em_result$kl
-    if (verbose) {
-      message(sprintf("Init EM: KL = %e", kl))
-    }
-  }
-
-  kl_prev <- kl
-  E_star <- NA_real_
-  converged <- FALSE
 
   # --- Main loop: each iter adds one FW atom then refines with EM ---
-  for (atom_idx in seq_len(max_fw_atoms)) {
-    log_Pw_gpu <- workspace$compute_log_Pw_gpu(weights)
-    fw <- fw_oracle(
-      face_descriptors,
-      likelihood,
-      workspace$log_q_mass_gpu,
-      log_Pw_gpu,
-      oracle_grid
-    )
-    E_star <- fw$E_star
+  converged <- FALSE
+  for (atom_idx in seq_len(max_fw_atoms + 1L)) {
+    if (atom_idx == 1L) {
+      # Initialisation: one atom per face, projected from mode if it exists, otherwise use mean.
+      atoms <- lapply(face_descriptors, function(fd) {
+        fd$init_point(if (anyNA(q@mode)) q@mean else q@mode)
+      })
+      atom_face_idx <- seq_along(face_descriptors)
+      for (th in atoms) {
+        workspace$add_atom_col(th)
+      }
 
-    log_tm_new <- likelihood$log_pmf(fw$best_theta)
-    eps_star <- line_search(log_Pw_gpu, log_tm_new, workspace$q_mass_gpu)
+      weights <- rep(1 / n_faces, n_faces)
+      kl <- workspace$kl_loss_and_grad(weights)$loss
+      kl_prev <- kl
 
-    weights <- c(weights * (1 - eps_star), eps_star)
-    atoms <- c(atoms, list(fw$best_theta))
-    atom_face_idx <- c(atom_face_idx, fw$best_fi)
-    workspace$add_atom_col(fw$best_theta)
+      record_trace(0L, "init", n_faces, kl)
 
-    kl_after_fw <- workspace$kl_loss_and_grad(weights)$loss
-    record_trace(atom_idx, "fw", workspace$n_live(), kl_after_fw)
-    kl <- kl_after_fw
+      kl_after_fw <- kl
+      eps_star <- NA_real_
+    } else {
+      # --- Frank-Wolfe step ---
+      log_Pw_gpu <- workspace$compute_log_Pw_gpu(weights)
+      fw <- fw_oracle(
+        face_descriptors,
+        likelihood,
+        workspace$log_q_mass_gpu,
+        log_Pw_gpu,
+        oracle_grid
+      )
 
-    if (n_em_iter > 0L) {
+      log_tm_new <- likelihood$log_pmf(fw$best_theta)
+      eps_star <- line_search(log_Pw_gpu, log_tm_new, workspace$q_mass_gpu)
+
+      weights <- c(weights * (1 - eps_star), eps_star)
+      atoms <- c(atoms, list(fw$best_theta))
+      atom_face_idx <- c(atom_face_idx, fw$best_fi)
+      workspace$add_atom_col(fw$best_theta)
+
+      kl_after_fw <- workspace$kl_loss_and_grad(weights)$loss
+      record_trace(atom_idx, "fw", workspace$n_live(), kl_after_fw)
+      kl <- kl_after_fw
+    }
+
+    if (em_iters > 0L) {
       em_result <- run_em_step(
         workspace,
         face_descriptors,
@@ -551,8 +586,9 @@ run_ripr <- function(
         atoms,
         atom_face_idx,
         oracle_grid,
-        n_em_iter,
-        kl_tol,
+        em_iters,
+        kl_atol,
+        kl_rtol,
         kl
       )
       weights <- em_result$weights
@@ -563,19 +599,29 @@ run_ripr <- function(
       kl <- em_result$kl
     }
 
+    log_Pw_gpu <- workspace$compute_log_Pw_gpu(weights)
+    fw <- fw_oracle(
+      face_descriptors,
+      likelihood,
+      workspace$log_q_mass_gpu,
+      log_Pw_gpu,
+      oracle_grid
+    )
+    E_star <- fw$E_star
+
     outer_row <- outer_row + 1L
     outer_iter[outer_row] <- atom_idx
-    outer_face_idx[outer_row] <- fw$best_fi
     outer_E_ratio[outer_row] <- E_star
-    outer_eps_star[outer_row] <- eps_star
-    outer_kl_after_fw[outer_row] <- kl_after_fw
     outer_kl_after_em[outer_row] <- kl
+    outer_face_idx[outer_row] <- fw$best_fi
+    outer_kl_after_fw[outer_row] <- kl_after_fw
+    outer_eps_star[outer_row] <- eps_star
 
     if (verbose) {
       message(sprintf(
-        "Atom %d/%d: max_E_ratio - 1 = %e, KL = %e, delta_KL = %e, eps* = %.4f",
-        atom_idx,
-        max_fw_atoms,
+        "Atom %d/%d: E_th[E]-1 = %e, KL = %e, delta_KL = %e, eps* = %.4f",
+        n_faces + atom_idx - 1L,
+        max_atoms,
         E_star - 1,
         kl,
         kl_prev - kl,
@@ -583,7 +629,7 @@ run_ripr <- function(
       ))
     }
 
-    if (kl_prev - kl < kl_tol && E_star - 1 < gap_tol) {
+    if (E_star - 1 < gap_tol) {
       converged <- TRUE
       break
     }

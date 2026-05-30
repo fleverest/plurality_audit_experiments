@@ -130,6 +130,14 @@ method(log_pmf, discrete_simplex_mixture) <- function(
   X,
   warn = TRUE
 ) {
+  # Convert to a torch tensor if needed
+  if (!inherits(X, "torch_tensor")) {
+    if (is.null(dim(X))) {
+      X <- torch_tensor(matrix(X, nrow = 1L), device = device, dtype = dtype)
+    } else {
+      X <- torch_tensor(as.matrix(X), device = device, dtype = dtype)
+    }
+  }
   n <- X[1, ]$sum()$item()
   log_atoms_t <- torch_tensor(
     log(simplex_mixture@atoms),
@@ -234,6 +242,15 @@ method(log_pmf, truncated_dirichlet) <- function(
   simplex_mixture,
   X
 ) {
+  # Convert to a torch tensor if needed
+  if (!inherits(X, "torch_tensor")) {
+    if (is.null(dim(X))) {
+      X <- torch_tensor(matrix(X, nrow = 1L), device = device, dtype = dtype)
+    } else {
+      X <- torch_tensor(as.matrix(X), device = device, dtype = dtype)
+    }
+  }
+
   n <- X[1, ]$sum()$item()
 
   alpha <- simplex_mixture@alpha

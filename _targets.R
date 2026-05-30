@@ -43,23 +43,10 @@ tar_option_set(
 )
 
 
-# Define the alternatives of interest.
-simplex_k3_alt <- simplex_lattice(3, 50L) / 50L
-simplex_k3_alt <- t(simplex_k3_alt[
-  simplex_k3_alt[, 1L] > simplex_k3_alt[, 2L] &
-    simplex_k3_alt[, 1L] > simplex_k3_alt[, 3L],
-])
-simplex_k4_alt <- simplex_lattice(4, 25L) / 25L
-simplex_k4_alt <- t(simplex_k4_alt[
-  simplex_k4_alt[, 1L] > simplex_k4_alt[, 2L] &
-    simplex_k4_alt[, 1L] > simplex_k4_alt[, 3L] &
-    simplex_k4_alt[, 1L] > simplex_k4_alt[, 4L],
-])
-
 list(
   tar_target(
     max_n,
-    100L
+    5L
   ),
 
   tar_target(n_vals, as.list(seq_len(max_n))),
@@ -133,9 +120,13 @@ list(
       result <- run_plurality_ripr(
         n = n,
         q = q_opt$Q,
-        max_atoms_added = 10L,
-        n_em_iter = 100L,
-        verbose = TRUE
+        max_atoms = 10L,
+        em_iters = 200L,
+        oracle_grid = 1e-6,
+        verbose = TRUE,
+        gap_tol = 1e-4,
+        kl_atol = 1e-12,
+        kl_rtol = 1e-6
       )
       list(
         Q_name = q_opt$name,
@@ -269,7 +260,7 @@ list(
   # batch_size, values (max_n x sim_reps matrix)}.
   tar_target(
     batch_sizes,
-    list(1L, 5L, 10L)
+    list(1L, 2L) #, 5L, 10L, 25L)
   ),
   tar_target(
     batch_ripr,

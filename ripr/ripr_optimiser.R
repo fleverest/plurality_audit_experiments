@@ -276,6 +276,36 @@ line_search <- function(log_Pw_gpu, log_tm_new, q_mass_gpu, tol = 1e-12) {
   eps_star
 }
 
+#' Pairwise (vertex exchange) line search: transfer alpha in [0, w_worst] from
+#' the worst atom to the new FW atom. Works in linear probability space since
+#' the update direction can be negative.
+pairwise_line_search <- function(
+  log_Pw_gpu,
+  log_tm_new,
+  log_tm_worst,
+  w_worst,
+  q_mass_gpu,
+  tol = 1e-12
+) {
+  if (w_worst < 1e-10) {
+    return(0)
+  }
+  Pw <- log_Pw_gpu$exp()
+  p_new <- log_tm_new$exp()
+  p_worst <- log_tm_worst$exp()
+  delta <- p_new - p_worst
+  g <- function(alpha) {
+    -(q_mass_gpu * (Pw + alpha * delta)$log())$nan_to_num(
+      nan = 0.0
+    )$sum()$item()
+  }
+  alpha_star <- optimize(g, interval = c(0, w_worst), tol = tol)$minimum
+  if (g(alpha_star) >= g(0)) {
+    alpha_star <- 0
+  }
+  alpha_star
+}
+
 # =============================================================================
 # Workspace: closures over the pre-allocated atom-log-PMF buffers.
 # =============================================================================
@@ -367,6 +397,15 @@ make_ripr_workspace <- function(likelihood, q, max_atoms) {
     log_r - torch_logsumexp(log_r, dim = 2L, keepdim = TRUE)
   }
 
+  #' E_ratio for every live atom simultaneously; returns numeric vector of length n_live.
+  compute_e_ratios <- function(log_Pw_gpu) {
+    lc_live <- lc$narrow(2L, 1L, n_live)
+    log_terms <- (lc_live +
+      log_q_mass_gpu$unsqueeze(2L) -
+      log_Pw_gpu$unsqueeze(2L))$nan_to_num(nan = -Inf)
+    as.numeric(torch_logsumexp(log_terms, dim = 1L)$exp()$cpu())
+  }
+
   list(
     H_Q = H_Q,
     log_q_mass_gpu = log_q_mass_gpu,
@@ -377,6 +416,7 @@ make_ripr_workspace <- function(likelihood, q, max_atoms) {
     compute_log_Pw_gpu = compute_log_Pw_gpu,
     kl_loss_and_grad = kl_loss_and_grad,
     compute_responsibilities = compute_responsibilities,
+    compute_e_ratios = compute_e_ratios,
     lc_col = function(k) lc[, k]
   )
 }
@@ -449,13 +489,13 @@ run_em_step <- function(
 # Main optimiser
 # =============================================================================
 
-#' Generic RIPr optimiser via Frank-Wolfe + EM hybrid.
+#' Generic RIPr optimiser via Pairwise Frank-Wolfe with intermediate EM steps.
 #'
 #' Minimises D(Q || P_W) over mixtures W supported on a piecewise-convex null
 #' hypothesis described by face descriptors. The optimisation begins by
 #' initialising one atom per face (projected from q_max) and running EM to
 #' refine that initial mixture. Each subsequent outer iteration runs the FW
-#' oracle to add the most adversarial atom, then refines via EM.
+#' oracle to add the most adversarial atom, then refines again via EM.
 #'
 #' @param face_descriptors List of face descriptors. See
 #'   [plurality_face_descriptors()].
@@ -468,6 +508,12 @@ run_em_step <- function(
 #' @param kl_atol Absolute tolerance for EM convergence. Default 1e-12.
 #' @param kl_rtol Relative tolerance for EM convergence. Default 1e-6
 #' @param gap_tol Convergence tolerance on the FW gap. Default 1e-6.
+#' @param ls_tol Line-search tolerance. This controls the monotonicity (in KL)
+#'   of the FW step. Default 1e-12.
+#' @param removal_thresh Weight threshold below which an atom is pruned after a
+#'   pairwise step. When the worst atom's post-transfer weight falls below this
+#'   value its workspace slot is overwritten in-place by the new atom, keeping
+#'   the mixture size bounded. Default 1e-6.
 #' @param verbose Print progress. Default TRUE. Each outer iteration prints:
 #'   `Gap` (FW duality gap = E_star - 1), `KL` (current KL divergence, with Δ
 #'   showing the change since the previous iteration), `ULB` (running maximum
@@ -502,6 +548,8 @@ run_ripr <- function(
   kl_atol = 1e-12,
   kl_rtol = 1e-6,
   gap_tol = 1e-6,
+  ls_tol = 1e-12,
+  removal_thresh = 1e-8,
   verbose = TRUE
 ) {
   # Default to one atom per face.
@@ -517,16 +565,17 @@ run_ripr <- function(
       n_faces
     ))
   }
-  max_fw_atoms <- max_atoms - n_faces
   workspace <- make_ripr_workspace(likelihood, q, max_atoms)
 
   # --- History accumulators ---
-  # Pre-allocate generously; trim at the end.
-  max_rows <- (max_fw_atoms + 1L) * (em_iters + 1L) + 1L
-  trace_iter <- integer(max_rows)
-  trace_type <- character(max_rows)
-  trace_n_atoms <- integer(max_rows)
-  trace_kl <- numeric(max_rows)
+  # Pre-allocate with generous bound: full-replacement steps don't consume buffer
+  # slots, so total iterations can exceed max_atoms - n_faces. Trim at the end.
+  max_outer_rows <- max_atoms * 5L + 10L
+  max_trace_rows <- max_outer_rows * (em_iters + 1L) + 1L
+  trace_iter <- integer(max_trace_rows)
+  trace_type <- character(max_trace_rows)
+  trace_n_atoms <- integer(max_trace_rows)
+  trace_kl <- numeric(max_trace_rows)
   trace_row <- 0L
 
   record_trace <- function(iter, type, n_atoms, kl_val) {
@@ -537,13 +586,14 @@ run_ripr <- function(
     trace_kl[trace_row] <<- kl_val
   }
 
-  outer_iter <- integer(max_fw_atoms + 1L)
-  outer_face_idx <- integer(max_fw_atoms + 1L)
-  outer_E_ratio <- numeric(max_fw_atoms + 1L)
-  outer_eps_star <- numeric(max_fw_atoms + 1L)
-  outer_kl_after_fw <- numeric(max_fw_atoms + 1L)
-  outer_kl_after_em <- numeric(max_fw_atoms + 1L)
-  outer_kl_ulb <- numeric(max_fw_atoms + 1L)
+  outer_iter <- integer(max_outer_rows)
+  outer_face_idx <- integer(max_outer_rows)
+  outer_E_ratio <- numeric(max_outer_rows)
+  outer_eps_star <- numeric(max_outer_rows)
+  outer_prop_star <- numeric(max_outer_rows)
+  outer_kl_after_fw <- numeric(max_outer_rows)
+  outer_kl_after_em <- numeric(max_outer_rows)
+  outer_kl_ulb <- numeric(max_outer_rows)
   outer_row <- 0L
   kl_ulb <- -Inf
 
@@ -561,52 +611,13 @@ run_ripr <- function(
     ))
   }
 
-  # --- Main loop: each iter adds one FW atom then refines with EM ---
-  converged <- FALSE
-  for (atom_idx in seq_len(max_fw_atoms + 1L)) {
-    if (atom_idx == 1L) {
-      # Initialisation: one atom per face, projected from mode if it exists, otherwise use mean.
-      atoms <- lapply(face_descriptors, function(fd) {
-        fd$init_point(if (anyNA(q@mode)) q@mean else q@mode)
-      })
-      atom_face_idx <- seq_along(face_descriptors)
-      for (th in atoms) {
-        workspace$add_atom_col(th)
-      }
+  # ---- Helper: run oracle + EM + record history for one outer iteration. ------
+  # Returns updated kl and sets E_star / theta_star / kl_ulb in the enclosing
+  # scope (via <<-) so the convergence check below can see them.
+  E_star <- NA_real_
+  theta_star <- NULL
 
-      weights <- rep(1 / n_faces, n_faces)
-      kl <- workspace$kl_loss_and_grad(weights)$loss
-      kl_prev <- kl
-
-      record_trace(0L, "init", n_faces, kl)
-
-      kl_after_fw <- kl
-      eps_star <- NA_real_
-    } else {
-      # --- Frank-Wolfe step ---
-      kl_check <- workspace$kl_loss_and_grad(weights)$loss
-      log_Pw_gpu <- workspace$compute_log_Pw_gpu(weights)
-      fw <- fw_oracle(
-        face_descriptors,
-        likelihood,
-        workspace$log_q_mass_gpu,
-        log_Pw_gpu,
-        n_seeds
-      )
-
-      log_tm_new <- likelihood$log_pmf(fw$best_theta)
-      eps_star <- line_search(log_Pw_gpu, log_tm_new, workspace$q_mass_gpu)
-
-      weights <- c(weights * (1 - eps_star), eps_star)
-      atoms <- c(atoms, list(fw$best_theta))
-      atom_face_idx <- c(atom_face_idx, fw$best_fi)
-      workspace$add_atom_col(fw$best_theta)
-
-      kl_after_fw <- workspace$kl_loss_and_grad(weights)$loss
-      record_trace(atom_idx, "fw", workspace$n_live(), kl_after_fw)
-      kl <- kl_after_fw
-    }
-
+  run_outer_iter <- function(atom_idx, kl_after_fw, eps_star, prop_star) {
     if (em_iters > 0L) {
       em_result <- run_em_step(
         workspace,
@@ -618,14 +629,16 @@ run_ripr <- function(
         em_iters,
         kl_atol,
         kl_rtol,
-        kl
+        kl_after_fw
       )
-      weights <- em_result$weights
-      atoms <- em_result$atoms
+      weights <<- em_result$weights
+      atoms <<- em_result$atoms
       for (kl_em in em_result$kl_trace) {
         record_trace(atom_idx, "em", workspace$n_live(), kl_em)
       }
-      kl <- em_result$kl
+      kl_out <- em_result$kl
+    } else {
+      kl_out <- kl_after_fw
     }
 
     log_Pw_gpu <- workspace$compute_log_Pw_gpu(weights)
@@ -636,31 +649,141 @@ run_ripr <- function(
       log_Pw_gpu,
       n_seeds
     )
-    E_star <- fw$E_star
-    theta_star <- fw$best_theta
+    E_star <<- fw$E_star
+    theta_star <<- fw$best_theta
+    kl_ulb <<- max(kl_ulb, kl_out - (E_star - 1))
 
-    kl_ulb <- max(kl_ulb, kl - (E_star - 1))
+    outer_row <<- outer_row + 1L
+    outer_iter[outer_row] <<- atom_idx
+    outer_E_ratio[outer_row] <<- E_star
+    outer_kl_after_em[outer_row] <<- kl_out
+    outer_face_idx[outer_row] <<- fw$best_fi
+    outer_kl_after_fw[outer_row] <<- kl_after_fw
+    outer_eps_star[outer_row] <<- eps_star
+    outer_prop_star[outer_row] <<- prop_star
+    outer_kl_ulb[outer_row] <<- kl_ulb
 
-    outer_row <- outer_row + 1L
-    outer_iter[outer_row] <- atom_idx
-    outer_E_ratio[outer_row] <- E_star
-    outer_kl_after_em[outer_row] <- kl
-    outer_face_idx[outer_row] <- fw$best_fi
-    outer_kl_after_fw[outer_row] <- kl_after_fw
-    outer_eps_star[outer_row] <- eps_star
-    outer_kl_ulb[outer_row] <- kl_ulb
+    kl_out
+  }
+
+  # --- Initialisation: one atom per face ---
+  converged <- FALSE
+  atom_idx <- 0L
+  atoms <- lapply(face_descriptors, function(fd) {
+    fd$init_point(if (anyNA(q@mode)) q@mean else q@mode)
+  })
+  atom_face_idx <- seq_along(face_descriptors)
+  for (th in atoms) {
+    workspace$add_atom_col(th)
+  }
+  weights <- rep(1 / n_faces, n_faces)
+  kl_init <- workspace$kl_loss_and_grad(weights)$loss
+  record_trace(0L, "init", n_faces, kl_init)
+
+  kl <- run_outer_iter(
+    atom_idx = 0L,
+    kl_after_fw = kl_init,
+    eps_star = NA_real_,
+    prop_star = NA_real_
+  )
+  kl_prev <- kl
+
+  if (verbose) {
+    message(sprintf(
+      "Init [%d/%d atoms]: Gap %e, KL %e, ULB %e",
+      workspace$n_live(),
+      max_atoms,
+      E_star - 1,
+      kl,
+      kl_ulb
+    ))
+  }
+  if (E_star - 1 < gap_tol) {
+    converged <- TRUE
+  }
+
+  # --- FW loop: continue until convergence or the atom buffer is full ---
+  # Full-replacement steps reuse a slot (n_live unchanged) so they don't count
+  # against the max_atoms budget, allowing more atoms to be added in later steps.
+  while (!converged && workspace$n_live() < max_atoms) {
+    atom_idx <- atom_idx + 1L
+
+    log_Pw_gpu <- workspace$compute_log_Pw_gpu(weights)
+    fw <- fw_oracle(
+      face_descriptors,
+      likelihood,
+      workspace$log_q_mass_gpu,
+      log_Pw_gpu,
+      n_seeds
+    )
+
+    log_tm_new <- likelihood$log_pmf(fw$best_theta)
+
+    # Find the away atom: lowest E_ratio among atoms with non-negligible weight.
+    e_ratios <- workspace$compute_e_ratios(log_Pw_gpu)
+    active_idx <- which(weights > removal_thresh)
+    k_worst <- active_idx[which.min(e_ratios[active_idx])]
+    w_worst <- weights[k_worst]
+    alpha_star <- pairwise_line_search(
+      log_Pw_gpu,
+      log_tm_new,
+      workspace$lc_col(k_worst),
+      w_worst,
+      workspace$q_mass_gpu,
+      tol = ls_tol
+    )
+
+    if (alpha_star > 0) {
+      eps_star <- alpha_star
+      if (w_worst - alpha_star < removal_thresh) {
+        # Full replacement: overwrite the drained atom's workspace slot in-place.
+        workspace$write_atom_col(k_worst, fw$best_theta)
+        atoms[[k_worst]] <- fw$best_theta
+        atom_face_idx[k_worst] <- fw$best_fi
+        weights[k_worst] <- w_worst # new atom inherits all of worst atom's mass
+        prop_star <- 1
+      } else {
+        # Partial transfer: append new atom as a new slot.
+        weights[k_worst] <- w_worst - alpha_star
+        weights <- c(weights, alpha_star)
+        atoms <- c(atoms, list(fw$best_theta))
+        atom_face_idx <- c(atom_face_idx, fw$best_fi)
+        workspace$add_atom_col(fw$best_theta)
+        prop_star <- alpha_star / w_worst
+      }
+    } else {
+      # Fallback to vanilla FW when the pairwise step gives no improvement.
+      eps_star <- line_search(
+        log_Pw_gpu,
+        log_tm_new,
+        workspace$q_mass_gpu,
+        tol = ls_tol
+      )
+      weights <- c(weights * (1 - eps_star), eps_star)
+      atoms <- c(atoms, list(fw$best_theta))
+      atom_face_idx <- c(atom_face_idx, fw$best_fi)
+      workspace$add_atom_col(fw$best_theta)
+      prop_star <- NA_real_
+    }
+
+    kl_after_fw <- workspace$kl_loss_and_grad(weights)$loss
+    record_trace(atom_idx, "fw", workspace$n_live(), kl_after_fw)
+
+    kl <- run_outer_iter(atom_idx, kl_after_fw, eps_star, prop_star)
 
     if (verbose) {
       message(sprintf(
-        "Atom %d/%d: Gap %e, KL %e (Δ%.1e), ULB %e, KL−ULB %e, ε* %.2e",
-        n_faces + atom_idx - 1L,
+        "Iter %d [%d/%d atoms]: Gap %e, KL %e (Δ%.1e), ULB %e, KL−ULB %e, α* %.2e, prop* %.2f",
+        atom_idx,
+        workspace$n_live(),
         max_atoms,
         E_star - 1,
         kl,
         kl_prev - kl,
         kl_ulb,
         kl - kl_ulb,
-        eps_star
+        eps_star,
+        if (is.na(prop_star)) NaN else prop_star
       ))
     }
 
@@ -694,6 +817,7 @@ run_ripr <- function(
     face_idx = outer_face_idx[seq_len(outer_row)],
     E_ratio = outer_E_ratio[seq_len(outer_row)],
     eps_star = outer_eps_star[seq_len(outer_row)],
+    prop_star = outer_prop_star[seq_len(outer_row)],
     kl_after_fw = outer_kl_after_fw[seq_len(outer_row)],
     kl_after_em = outer_kl_after_em[seq_len(outer_row)],
     kl_ulb = outer_kl_ulb[seq_len(outer_row)],

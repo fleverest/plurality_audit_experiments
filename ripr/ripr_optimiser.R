@@ -468,7 +468,15 @@ run_em_step <- function(
 #' @param kl_atol Absolute tolerance for EM convergence. Default 1e-12.
 #' @param kl_rtol Relative tolerance for EM convergence. Default 1e-6
 #' @param gap_tol Convergence tolerance on the FW gap. Default 1e-6.
-#' @param verbose Print progress. Default TRUE.
+#' @param verbose Print progress. Default TRUE. Each outer iteration prints:
+#'   `Gap` (FW duality gap = E_star - 1), `KL` (current KL divergence, with Δ
+#'   showing the change since the previous iteration), `ULB` (running maximum
+#'   lower bound on the globally optimal KL, derived from the FW bound
+#'   KL - Gap at each iteration), `KL-ULB` (distance from the current KL to
+#'   that lower bound), and `ε*` (line-search mixing weight). **Note:** the ULB
+#'   is only meaningful when `n_seeds` and `n_restarts` are large enough that
+#'   the FW oracle reliably finds the true maximum of E_theta[Q/P_w]; an
+#'   under-powered oracle underestimates the gap, inflating the ULB.
 #' @return List with:
 #'   - `atoms`: list of atom theta vectors.
 #'   - `atom_face_idx`: integer vector of face indices for each atom.
@@ -477,9 +485,11 @@ run_em_step <- function(
 #'       `iter` (outer iteration; 0 for init), `step_type`
 #'       (`"init"`, `"em"`, `"fw"`), `n_atoms`, `kl`.
 #'   - `outer_history`: data.frame with one row per outer iteration. Columns:
-#'       `iter`, `face_idx`, `E_ratio`, `eps_star`, `kl_after_fw`, `kl_after_em`.
+#'       `iter`, `face_idx`, `E_ratio`, `eps_star`, `kl_after_fw`,
+#'       `kl_after_em`, `kl_ulb` (running upper lower bound on optimal KL).
 #'   - `E_star`: terminal FW gap value.
 #'   - `kl`: terminal KL divergence.
+#'   - `kl_ulb`: tightest lower bound on the optimal KL seen across all iterations.
 #'   - `converged`: TRUE if convergence criteria were met.
 #' @export
 run_ripr <- function(
@@ -533,7 +543,9 @@ run_ripr <- function(
   outer_eps_star <- numeric(max_fw_atoms + 1L)
   outer_kl_after_fw <- numeric(max_fw_atoms + 1L)
   outer_kl_after_em <- numeric(max_fw_atoms + 1L)
+  outer_kl_ulb <- numeric(max_fw_atoms + 1L)
   outer_row <- 0L
+  kl_ulb <- -Inf
 
   if (verbose) {
     message(sprintf(
@@ -627,6 +639,8 @@ run_ripr <- function(
     E_star <- fw$E_star
     theta_star <- fw$best_theta
 
+    kl_ulb <- max(kl_ulb, kl - (E_star - 1))
+
     outer_row <- outer_row + 1L
     outer_iter[outer_row] <- atom_idx
     outer_E_ratio[outer_row] <- E_star
@@ -634,15 +648,18 @@ run_ripr <- function(
     outer_face_idx[outer_row] <- fw$best_fi
     outer_kl_after_fw[outer_row] <- kl_after_fw
     outer_eps_star[outer_row] <- eps_star
+    outer_kl_ulb[outer_row] <- kl_ulb
 
     if (verbose) {
       message(sprintf(
-        "Atom %d/%d: E_th[E]-1 = %e, KL = %e, delta_KL = %e, eps* = %.4f",
+        "Atom %d/%d: Gap %e, KL %e (Δ%.1e), ULB %e, KL−ULB %e, ε* %.2e",
         n_faces + atom_idx - 1L,
         max_atoms,
         E_star - 1,
         kl,
         kl_prev - kl,
+        kl_ulb,
+        kl - kl_ulb,
         eps_star
       ))
     }
@@ -679,6 +696,7 @@ run_ripr <- function(
     eps_star = outer_eps_star[seq_len(outer_row)],
     kl_after_fw = outer_kl_after_fw[seq_len(outer_row)],
     kl_after_em = outer_kl_after_em[seq_len(outer_row)],
+    kl_ulb = outer_kl_ulb[seq_len(outer_row)],
     stringsAsFactors = FALSE
   )
 
@@ -692,6 +710,7 @@ run_ripr <- function(
     E_star = E_star,
     theta_star = theta_star,
     kl = kl,
+    kl_ulb = kl_ulb,
     converged = converged
   )
 }

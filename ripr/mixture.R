@@ -284,7 +284,8 @@ method(n_categories, truncated_dirichlet) <- function(simplex_mixture) {
 
 #' Compute the expected likelihood ratio of two mixtures under a multinomial DGP
 #' with sample size n, i.e. E_{X ~ Multinomial(n, theta)}[P(X|Q) / P(X|P)].
-#' @param theta Numeric vector of length K with the multinomial parameter theta.
+#' @param theta Numeric vector of length K or matrix with dimension (K, .) with
+#' the multinomial parameter(s) theta.
 #' @param n Integer sample size of the multinomial DGP.
 #' @param Q A `simplex_mixture` representing the alternative distribution Q.
 #' @param P A `simplex_mixture` representing the null distribution P.

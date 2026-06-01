@@ -1,4 +1,5 @@
 box::use(
+  stats[rgamma, optim, optimize],
   torch[
     torch_tensor,
     torch_full,
@@ -8,12 +9,12 @@ box::use(
   ripr / torch_settings[device, dtype],
   ripr / tensor_ops[add_ninf_any_, logsumexp_inplace_],
   ripr / mixture[log_pmf, n_categories],
+  ripr / multinomial[make_multinomial_likelihood],
   ripr /
     simplex_utils[
       alpha_from_v,
       v_from_alpha,
-      softmax_jacobian,
-      simplex_lattice
+      softmax_jacobian
     ]
 )
 
@@ -54,30 +55,30 @@ e_ratio_grad_theta <- function(
   weighted_score_sum(weights_x, likelihood$score(theta))
 }
 
-#' Generic per-face optimiser: simplex-lattice grid search + BFGS refinement.
+#' Generic per-face optimiser: random Dirichlet seed search + BFGS refinement.
 #'
 #' `obj_and_grad(v)` is the BFGS objective in the unconstrained softmax
 #' parametrisation `v`. `obj_grid_eval(alpha_mat)` evaluates the negative
 #' objective at a batch of simplex points (used to pick BFGS seeds).
-#' `oracle_grid` controls the density of the simplex lattice used for seed selection.
+#' `n_seeds` controls how many random Dirichlet points are sampled for seed selection.
 #' `seed_alpha` can be set to skip the global search and just run BFGS from a
 #' single initial point.
 optimise_on_face <- function(
   fd,
   obj_and_grad,
   obj_grid_eval,
-  oracle_grid = NULL,
+  n_seeds = NULL,
   n_restarts = 25L,
   seed_alpha = NULL
 ) {
   n_vertices <- fd$n_vertices
 
-  # Local-mode early return
+  # Local optimisation
   if (!is.null(seed_alpha)) {
     init_alpha <- pmax(seed_alpha, 1e-8)
     init_alpha <- init_alpha / sum(init_alpha)
     res <- tryCatch(
-      stats::optim(
+      optim(
         v_from_alpha(init_alpha),
         fn = function(v) obj_and_grad(v)$value,
         gr = function(v) obj_and_grad(v)$gradient,
@@ -89,10 +90,15 @@ optimise_on_face <- function(
     )
     return(list(alpha_star = alpha_from_v(res$par), neg_value = res$value))
   }
+  # Global (hopefully) optimisation via random restarts on a simplex lattice grid.
 
-  # Original global-mode body, unchanged:
-  lat_density <- max(3L, round(oracle_grid^(1 / max(1L, n_vertices - 1L))))
-  alpha_mat <- simplex_lattice(n_vertices, lat_density) / lat_density
+  # Seed optimisation with dirichlet
+  alpha_mat <- matrix(
+    rgamma(n_seeds * n_vertices, shape = 1),
+    nrow = n_seeds,
+    ncol = n_vertices
+  )
+  alpha_mat <- alpha_mat / rowSums(alpha_mat)
 
   neg_obj_grid <- obj_grid_eval(alpha_mat)
   top_idx <- order(neg_obj_grid, decreasing = TRUE)[seq_len(min(
@@ -105,7 +111,7 @@ optimise_on_face <- function(
     init_alpha <- pmax(alpha_mat[idx, ], 1e-8)
     init_alpha <- init_alpha / sum(init_alpha)
     res <- tryCatch(
-      stats::optim(
+      optim(
         v_from_alpha(init_alpha),
         fn = function(v) obj_and_grad(v)$value,
         gr = function(v) obj_and_grad(v)$gradient,
@@ -153,7 +159,7 @@ fw_oracle_face <- function(
   likelihood,
   log_q_mass_gpu,
   log_Pw_gpu,
-  oracle_grid
+  n_seeds
 ) {
   value_fn <- function(theta) {
     e_ratio(likelihood$log_pmf(theta), log_q_mass_gpu, log_Pw_gpu)
@@ -181,7 +187,7 @@ fw_oracle_face <- function(
     fd,
     obj_and_grad,
     obj_grid_eval,
-    oracle_grid = oracle_grid
+    n_seeds = n_seeds
   )
   list(theta = fd$parametrise(res$alpha_star), E_ratio = -res$neg_value)
 }
@@ -193,10 +199,10 @@ fw_oracle <- function(
   likelihood,
   log_q_mass_gpu,
   log_Pw_gpu,
-  oracle_grid
+  n_seeds
 ) {
   face_results <- lapply(face_descriptors, function(fd) {
-    fw_oracle_face(fd, likelihood, log_q_mass_gpu, log_Pw_gpu, oracle_grid)
+    fw_oracle_face(fd, likelihood, log_q_mass_gpu, log_Pw_gpu, n_seeds)
   })
   E_ratios <- vapply(face_results, `[[`, "E_ratio", FUN.VALUE = numeric(1L))
   best_fi <- which.max(E_ratios)
@@ -253,8 +259,8 @@ em_mstep_face <- function(
   )
 }
 
-#' Optimal mixing weight eps in [0, 1] for adding a new atom to P_w.
-line_search <- function(log_Pw_gpu, log_tm_new, q_mass_gpu) {
+#' Optimal mixing weight eps in [1e-10, 1-1e-10] for adding a new atom to P_w.
+line_search <- function(log_Pw_gpu, log_tm_new, q_mass_gpu, tol = 1e-12) {
   m <- torch_maximum(log_Pw_gpu, log_tm_new)
   exp_a <- (log_Pw_gpu - m)$exp()
   exp_b <- (log_tm_new - m)$exp()
@@ -262,7 +268,12 @@ line_search <- function(log_Pw_gpu, log_tm_new, q_mass_gpu) {
     log_mix <- m + ((1 - eps) * exp_a + eps * exp_b)$log()
     -(q_mass_gpu * log_mix)$nan_to_num(nan = 0.0)$sum()$item()
   }
-  stats::optimize(g, interval = c(1e-10, 1 - 1e-10))$minimum
+
+  eps_star <- optimize(g, interval = c(1e-10, 1 - 1e-10), tol = tol)$minimum
+  if (g(eps_star) >= g(1e-10)) {
+    eps_star <- 1e-10
+  }
+  eps_star
 }
 
 # =============================================================================
@@ -357,6 +368,7 @@ make_ripr_workspace <- function(likelihood, q, max_atoms) {
   }
 
   list(
+    H_Q = H_Q,
     log_q_mass_gpu = log_q_mass_gpu,
     q_mass_gpu = q_mass_gpu,
     n_live = function() n_live,
@@ -380,7 +392,6 @@ run_em_step <- function(
   weights,
   atoms,
   atom_face_idx,
-  oracle_grid,
   em_iters,
   kl_atol,
   kl_rtol,
@@ -451,8 +462,8 @@ run_em_step <- function(
 #' @param likelihood Likelihood interface. See [make_multinomial_likelihood()].
 #' @param q A `simplex_mixture` representing the numerator distribution Q.
 #' @param max_atoms Total budget of atoms (including the K-1 initial atoms).
-#'   Must be at least K-1. Default 50.
-#' @param oracle_grid Grid density for per-face oracle. Default 200.
+#'   Must be at least K-1. Default NULL (K-1 atoms, one per face).
+#' @param n_seeds Number of random Dirichlet seeds per face for the oracle. Default 200.
 #' @param em_iters Max EM iterations per outer step. Default 3.
 #' @param kl_atol Absolute tolerance for EM convergence. Default 1e-12.
 #' @param kl_rtol Relative tolerance for EM convergence. Default 1e-6
@@ -475,14 +486,19 @@ run_ripr <- function(
   face_descriptors,
   likelihood,
   q,
-  max_atoms = 50L,
-  oracle_grid = 200L,
-  em_iters = 3L,
+  max_atoms = NULL,
+  n_seeds = 200L,
+  em_iters = 50L,
   kl_atol = 1e-12,
   kl_rtol = 1e-6,
   gap_tol = 1e-6,
   verbose = TRUE
 ) {
+  # Default to one atom per face.
+  if (is.null(max_atoms)) {
+    max_atoms <- n_categories(q) - 1L
+  }
+
   n_faces <- length(face_descriptors)
   if (max_atoms < n_faces) {
     stop(sprintf(
@@ -521,14 +537,15 @@ run_ripr <- function(
 
   if (verbose) {
     message(sprintf(
-      "run_ripr: K=%d, M=%d outcomes, max_atoms=%d, %d faces, kl_atol=%g, kl_rtol=%g, gap_tol=%g",
+      "run_ripr: K=%d, M=%d outcomes, max_atoms=%d, %d faces, kl_atol=%g, kl_rtol=%g, gap_tol=%g, n_seeds=%d",
       likelihood$K,
       likelihood$M,
       max_atoms,
       n_faces,
       kl_atol,
       kl_rtol,
-      gap_tol
+      gap_tol,
+      n_seeds
     ))
   }
 
@@ -555,13 +572,14 @@ run_ripr <- function(
       eps_star <- NA_real_
     } else {
       # --- Frank-Wolfe step ---
+      kl_check <- workspace$kl_loss_and_grad(weights)$loss
       log_Pw_gpu <- workspace$compute_log_Pw_gpu(weights)
       fw <- fw_oracle(
         face_descriptors,
         likelihood,
         workspace$log_q_mass_gpu,
         log_Pw_gpu,
-        oracle_grid
+        n_seeds
       )
 
       log_tm_new <- likelihood$log_pmf(fw$best_theta)
@@ -585,7 +603,6 @@ run_ripr <- function(
         weights,
         atoms,
         atom_face_idx,
-        oracle_grid,
         em_iters,
         kl_atol,
         kl_rtol,
@@ -605,9 +622,10 @@ run_ripr <- function(
       likelihood,
       workspace$log_q_mass_gpu,
       log_Pw_gpu,
-      oracle_grid
+      n_seeds
     )
     E_star <- fw$E_star
+    theta_star <- fw$best_theta
 
     outer_row <- outer_row + 1L
     outer_iter[outer_row] <- atom_idx
@@ -672,7 +690,41 @@ run_ripr <- function(
     kl_trace = kl_trace,
     outer_history = outer_history,
     E_star = E_star,
+    theta_star = theta_star,
     kl = kl,
     converged = converged
+  )
+}
+
+
+#' Frank-Wolfe gap for two simplex mixtures over a null hypothesis boundary.
+#'
+#' Computes max_theta E_theta[Q / P] over the null hypothesis faces, returning
+#' both the gap value and the maximising theta. Values above 1 indicate the
+#' mixture P has not yet minimised KL(Q || P) over the null.
+#'
+#' @param Q A `simplex_mixture` for the alternative distribution.
+#' @param P A `simplex_mixture` for the null mixture.
+#' @param face_descriptors List of face descriptors. See [plurality_face_descriptors()].
+#' @param n Integer. Multinomial sample size.
+#' @param n_seeds Integer. Random Dirichlet seeds per face. Default 200L.
+#' @return List with `E_star` (numeric) and `theta_star` (numeric vector).
+#' @export
+fw_gap <- function(Q, P, face_descriptors, n, n_seeds = 200L) {
+  K <- n_categories(Q)
+  likelihood <- make_multinomial_likelihood(n, K)
+  log_q_mass_gpu <- log_pmf(Q, likelihood$support_tensor)
+  log_Pw_gpu <- log_pmf(P, likelihood$support_tensor)
+  fw <- fw_oracle(
+    face_descriptors,
+    likelihood,
+    log_q_mass_gpu,
+    log_Pw_gpu,
+    n_seeds
+  )
+  list(
+    E_star = fw$E_star,
+    theta_star = fw$best_theta,
+    face_results = fw$face_results
   )
 }

@@ -3,7 +3,7 @@ box::use(
   ripr /
     plurality_geometry[plurality_face_descriptors],
   ripr / multinomial[make_multinomial_likelihood],
-  ripr / ripr_optimiser[run_ripr]
+  ripr / ripr_optimiser[run_ripr, fw_gap]
 )
 
 #' RIPr optimiser for K-candidate plurality audits (multinomial)
@@ -19,8 +19,7 @@ box::use(
 #'   from `n_categories(q)`.
 #' @param max_atoms_added Integer. Maximum atoms added (beyond initialisation).
 #'   Default: 50.
-#' @param oracle_grid Integer. Grid density for the per-face oracle. Total
-#'   lattice points per face ~ `oracle_grid^(n_vertices - 1)`. Default: 200.
+#' @param n_seeds Integer. Random Dirichlet seeds per face for the oracle. Default: 200.
 #' @param kl_atol Absolute tolerance for EM convergence. Default 1e-12.
 #' @param kl_rtol Relative tolerance for EM convergence. Default 1e-6.
 #' @param gap_tol Numeric. Outer loop stops when the expected likelihood ratio
@@ -37,8 +36,8 @@ box::use(
 run_plurality_ripr <- function(
   n,
   q,
-  max_atoms = 50L,
-  oracle_grid = 200L,
+  max_atoms = NULL,
+  n_seeds = 200L,
   em_iters = 3L,
   kl_atol = 1e-12,
   kl_rtol = 1e-6,
@@ -54,7 +53,7 @@ run_plurality_ripr <- function(
     likelihood = likelihood,
     q = q,
     max_atoms = max_atoms,
-    oracle_grid = oracle_grid,
+    n_seeds = n_seeds,
     em_iters = em_iters,
     kl_atol = kl_atol,
     kl_rtol = kl_rtol,
@@ -71,6 +70,7 @@ run_plurality_ripr <- function(
     history = result$outer_history,
     kl_trace = result$kl_trace,
     E_star = result$E_star,
+    theta_star = result$theta_star,
     converged = result$converged
   )
 }

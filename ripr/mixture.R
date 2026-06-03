@@ -9,9 +9,10 @@ box::use(
     `method<-`,
     S7_object
   ],
-  torch[torch_tensor, torch_logsumexp, torch_lgamma],
+  torch[torch_tensor, torch_logsumexp],
   ripr / torch_settings[device, dtype],
-  ripr / multinomial[mnom_logpmf, make_multinomial_likelihood],
+  ripr /
+    multinomial[mnom_logpmf, make_multinomial_likelihood, log_multinom_coef],
   lib / dirichlet_exceedance[dirichlet_exceedance]
 )
 
@@ -125,19 +126,21 @@ discrete_simplex_mixture <- new_class(
   }
 )
 
+as_count_tensor <- function(X) {
+  if (inherits(X, "torch_tensor")) {
+    return(X)
+  }
+  X <- if (is.null(dim(X))) matrix(X, nrow = 1L) else as.matrix(X)
+  torch_tensor(X, device = device, dtype = dtype)
+}
+
 method(log_pmf, discrete_simplex_mixture) <- function(
   simplex_mixture,
   X,
   warn = TRUE
 ) {
   # Convert to a torch tensor if needed
-  if (!inherits(X, "torch_tensor")) {
-    if (is.null(dim(X))) {
-      X <- torch_tensor(matrix(X, nrow = 1L), device = device, dtype = dtype)
-    } else {
-      X <- torch_tensor(as.matrix(X), device = device, dtype = dtype)
-    }
-  }
+  X <- as_count_tensor(X)
   n <- X[1, ]$sum()$item()
   log_atoms_t <- torch_tensor(
     log(simplex_mixture@atoms),
@@ -168,15 +171,16 @@ log_I <- function(gamma) {
 trunc_dirichlet_mean <- function(alpha, log_I_alpha) {
   # E[theta_l] = I(alpha + e_l) / I(alpha) via the same exceedance trick.
   # K extra exceedance calls.
-  K <- length(alpha)
-  log_I_denom <- log_I_alpha
-  result <- numeric(K)
-  for (l in seq_len(K)) {
-    gamma <- alpha
-    gamma[l] <- gamma[l] + 1
-    result[l] <- exp(log_I(gamma) - log_I_denom)
-  }
-  result
+  log_I_num <- vapply(
+    seq_along(alpha),
+    function(l) {
+      gamma <- alpha
+      gamma[l] <- gamma[l] + 1
+      log_I(gamma)
+    },
+    numeric(1L)
+  )
+  exp(log_I_num - log_I_alpha)
 }
 
 trunc_dirichlet_mode <- function(alpha) {
@@ -184,11 +188,10 @@ trunc_dirichlet_mode <- function(alpha) {
   # when all alpha > 1. If it lies in H_1, return it. Otherwise return NA.
   K <- length(alpha)
   mode_unconstr <- (alpha - 1) / (sum(alpha) - K)
-  if (all(alpha > 1) && all(mode_unconstr[1] > mode_unconstr[-1])) {
+  if (all(alpha > 1) && all(mode_unconstr[1L] > mode_unconstr[-1L])) {
     return(mode_unconstr)
-  } else {
-    rep(NA_real_, K)
   }
+  rep(NA_real_, K)
 }
 
 #' Dirichlet on H_1 (for plurality)
@@ -243,13 +246,7 @@ method(log_pmf, truncated_dirichlet) <- function(
   X
 ) {
   # Convert to a torch tensor if needed
-  if (!inherits(X, "torch_tensor")) {
-    if (is.null(dim(X))) {
-      X <- torch_tensor(matrix(X, nrow = 1L), device = device, dtype = dtype)
-    } else {
-      X <- torch_tensor(as.matrix(X), device = device, dtype = dtype)
-    }
-  }
+  X <- as_count_tensor(X)
 
   n <- X[1, ]$sum()$item()
 
@@ -257,12 +254,7 @@ method(log_pmf, truncated_dirichlet) <- function(
   log_I_denom <- simplex_mixture@log_I_alpha
 
   # Multinomial coefficient on the GPU.
-  log_multinom_coef <- torch_lgamma(torch_tensor(
-    n + 1,
-    device = device,
-    dtype = dtype
-  )) -
-    torch_lgamma(X + 1)$sum(dim = 2L)
+  log_multinom_coef <- log_multinom_coef(X, n)
 
   # Numerator: log_I(alpha + x) per row. Exceedance isn't vectorised,
   # so loop. Move X to CPU once.

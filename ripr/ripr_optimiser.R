@@ -73,26 +73,28 @@ optimise_on_face <- function(
 ) {
   n_vertices <- fd$n_vertices
 
-  # Local optimisation
-  if (!is.null(seed_alpha)) {
-    init_alpha <- pmax(seed_alpha, 1e-8)
+  run_bfgs <- function(init_alpha, fallback_value) {
+    init_alpha <- pmax(init_alpha, 1e-8)
     init_alpha <- init_alpha / sum(init_alpha)
-    res <- tryCatch(
+    v0 <- v_from_alpha(init_alpha)
+    tryCatch(
       optim(
-        v_from_alpha(init_alpha),
+        v0,
         fn = function(v) obj_and_grad(v)$value,
         gr = function(v) obj_and_grad(v)$gradient,
         method = "BFGS"
       ),
-      error = function(e) {
-        list(par = v_from_alpha(init_alpha), value = Inf)
-      }
+      error = function(e) list(par = v0, value = fallback_value)
     )
+  }
+
+  # Local optimisation from a single seed.
+  if (!is.null(seed_alpha)) {
+    res <- run_bfgs(seed_alpha, fallback_value = Inf)
     return(list(alpha_star = alpha_from_v(res$par), neg_value = res$value))
   }
-  # Global (hopefully) optimisation via random restarts on a simplex lattice grid.
 
-  # Seed optimisation with dirichlet
+  # Global (hopefully) optimisation via random Dirichlet restarts.
   alpha_mat <- matrix(
     rgamma(n_seeds * n_vertices, shape = 1),
     nrow = n_seeds,
@@ -108,19 +110,7 @@ optimise_on_face <- function(
 
   best <- list(par = NULL, value = Inf)
   for (idx in top_idx) {
-    init_alpha <- pmax(alpha_mat[idx, ], 1e-8)
-    init_alpha <- init_alpha / sum(init_alpha)
-    res <- tryCatch(
-      optim(
-        v_from_alpha(init_alpha),
-        fn = function(v) obj_and_grad(v)$value,
-        gr = function(v) obj_and_grad(v)$gradient,
-        method = "BFGS"
-      ),
-      error = function(e) {
-        list(par = v_from_alpha(init_alpha), value = -neg_obj_grid[idx])
-      }
-    )
+    res <- run_bfgs(alpha_mat[idx, ], fallback_value = -neg_obj_grid[idx])
     if (res$value < best$value) best <- res
   }
   list(alpha_star = alpha_from_v(best$par), neg_value = best$value)
@@ -504,7 +494,7 @@ run_em_step <- function(
 #' @param max_atoms Total budget of atoms (including the K-1 initial atoms).
 #'   Must be at least K-1. Default NULL (K-1 atoms, one per face).
 #' @param n_seeds Number of random Dirichlet seeds per face for the oracle. Default 200.
-#' @param em_iters Max EM iterations per outer step. Default 3.
+#' @param em_iters Max EM iterations per outer step. Default 10.
 #' @param kl_atol Absolute tolerance for EM convergence. Default 1e-12.
 #' @param kl_rtol Relative tolerance for EM convergence. Default 1e-6
 #' @param gap_tol Convergence tolerance on the FW gap. Default 1e-6.
@@ -544,10 +534,10 @@ run_ripr <- function(
   q,
   max_atoms = NULL,
   n_seeds = 200L,
-  em_iters = 50L,
+  em_iters = 10L,
   kl_atol = 1e-12,
-  kl_rtol = 1e-6,
-  gap_tol = 1e-6,
+  kl_rtol = 1e-8,
+  gap_tol = 1e-8,
   ls_tol = 1e-12,
   removal_thresh = 1e-8,
   verbose = TRUE
@@ -568,34 +558,18 @@ run_ripr <- function(
   workspace <- make_ripr_workspace(likelihood, q, max_atoms)
 
   # --- History accumulators ---
-  # Pre-allocate with generous bound: full-replacement steps don't consume buffer
-  # slots, so total iterations can exceed max_atoms - n_faces. Trim at the end.
-  max_outer_rows <- max_atoms * 5L + 10L
-  max_trace_rows <- max_outer_rows * (em_iters + 1L) + 1L
-  trace_iter <- integer(max_trace_rows)
-  trace_type <- character(max_trace_rows)
-  trace_n_atoms <- integer(max_trace_rows)
-  trace_kl <- numeric(max_trace_rows)
-  trace_row <- 0L
+  trace_rows <- list()
+  outer_rows <- list()
+  kl_ulb <- -Inf
 
   record_trace <- function(iter, type, n_atoms, kl_val) {
-    trace_row <<- trace_row + 1L
-    trace_iter[trace_row] <<- iter
-    trace_type[trace_row] <<- type
-    trace_n_atoms[trace_row] <<- n_atoms
-    trace_kl[trace_row] <<- kl_val
+    trace_rows[[length(trace_rows) + 1L]] <<- data.frame(
+      iter = iter,
+      step_type = type,
+      n_atoms = n_atoms,
+      kl = kl_val
+    )
   }
-
-  outer_iter <- integer(max_outer_rows)
-  outer_face_idx <- integer(max_outer_rows)
-  outer_E_ratio <- numeric(max_outer_rows)
-  outer_eps_star <- numeric(max_outer_rows)
-  outer_prop_star <- numeric(max_outer_rows)
-  outer_kl_after_fw <- numeric(max_outer_rows)
-  outer_kl_after_em <- numeric(max_outer_rows)
-  outer_kl_ulb <- numeric(max_outer_rows)
-  outer_row <- 0L
-  kl_ulb <- -Inf
 
   if (verbose) {
     message(sprintf(
@@ -653,15 +627,16 @@ run_ripr <- function(
     theta_star <<- fw$best_theta
     kl_ulb <<- max(kl_ulb, kl_out - (E_star - 1))
 
-    outer_row <<- outer_row + 1L
-    outer_iter[outer_row] <<- atom_idx
-    outer_E_ratio[outer_row] <<- E_star
-    outer_kl_after_em[outer_row] <<- kl_out
-    outer_face_idx[outer_row] <<- fw$best_fi
-    outer_kl_after_fw[outer_row] <<- kl_after_fw
-    outer_eps_star[outer_row] <<- eps_star
-    outer_prop_star[outer_row] <<- prop_star
-    outer_kl_ulb[outer_row] <<- kl_ulb
+    outer_rows[[length(outer_rows) + 1L]] <<- data.frame(
+      iter = atom_idx,
+      face_idx = fw$best_fi,
+      E_ratio = E_star,
+      eps_star = eps_star,
+      prop_star = prop_star,
+      kl_after_fw = kl_after_fw,
+      kl_after_em = kl_out,
+      kl_ulb = kl_ulb
+    )
 
     kl_out
   }
@@ -804,25 +779,8 @@ run_ripr <- function(
     ))
   }
 
-  kl_trace <- data.frame(
-    iter = trace_iter[seq_len(trace_row)],
-    step_type = trace_type[seq_len(trace_row)],
-    n_atoms = trace_n_atoms[seq_len(trace_row)],
-    kl = trace_kl[seq_len(trace_row)],
-    stringsAsFactors = FALSE
-  )
-
-  outer_history <- data.frame(
-    iter = outer_iter[seq_len(outer_row)],
-    face_idx = outer_face_idx[seq_len(outer_row)],
-    E_ratio = outer_E_ratio[seq_len(outer_row)],
-    eps_star = outer_eps_star[seq_len(outer_row)],
-    prop_star = outer_prop_star[seq_len(outer_row)],
-    kl_after_fw = outer_kl_after_fw[seq_len(outer_row)],
-    kl_after_em = outer_kl_after_em[seq_len(outer_row)],
-    kl_ulb = outer_kl_ulb[seq_len(outer_row)],
-    stringsAsFactors = FALSE
-  )
+  kl_trace <- do.call(rbind, trace_rows)
+  outer_history <- do.call(rbind, outer_rows)
 
   n_live <- workspace$n_live()
   list(

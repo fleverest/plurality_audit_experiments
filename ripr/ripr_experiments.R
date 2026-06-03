@@ -17,8 +17,8 @@ box::use(
 #' @param n Integer. Total ballot count.
 #' @param q A `simplex_mixture` — the numerator distribution Q. `K` is inferred
 #'   from `n_categories(q)`.
-#' @param max_atoms_added Integer. Maximum atoms added (beyond initialisation).
-#'   Default: 50.
+#' @param max_atoms Integer. Total atom budget, including the K-1 initial atoms
+#'   (one per face). Default `NULL`, i.e. K-1.
 #' @param n_seeds Integer. Random Dirichlet seeds per face for the oracle. Default: 200.
 #' @param kl_atol Absolute tolerance for EM convergence. Default 1e-12.
 #' @param kl_rtol Relative tolerance for EM convergence. Default 1e-6.
@@ -30,8 +30,12 @@ box::use(
 #' @param verbose Logical. Print per-iteration progress. Default: `TRUE`.
 #' @return List with:
 #'   - `mixture`: a `discrete_simplex_mixture` with atoms on the null boundary.
-#'   - `history`: list of per-iteration info (`theta_stars`, `E_ratio`, `kl`).
-#'   - `converged`: `TRUE` if the validity condition was met.
+#'   - `history`: the `outer_history` data.frame from [run_ripr()] (one row per
+#'     outer iteration).
+#'   - `kl_trace`: the per-step KL trace data.frame from [run_ripr()].
+#'   - `E_star`: terminal FW gap value (max E_theta[Q / P_w]).
+#'   - `theta_star`: terminal maximising theta.
+#'   - `converged`: `TRUE` if the FW gap fell below `gap_tol`.
 #' @export
 run_plurality_ripr <- function(
   n,

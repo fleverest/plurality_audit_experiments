@@ -48,10 +48,7 @@ v_from_alpha <- function(alpha, eps = 1e-12) {
 #' @seealso [alpha_from_v()], [v_from_alpha()]
 #' @export
 softmax_jacobian <- function(alpha) {
-  (outer(alpha, alpha, function(a, b) -a * b) + diag(alpha))[,
-    -1L,
-    drop = FALSE
-  ]
+  (diag(alpha) - outer(alpha, alpha))[, -1L, drop = FALSE]
 }
 
 #' Simplex lattice (integer compositions)

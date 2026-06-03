@@ -11,6 +11,17 @@ box::use(
   ripr / tensor_ops[matmul_0_ninf]
 )
 
+#' Log multinomial coefficient log(n! / prod x_i!) per count vector
+#' @param X Tensor of shape (M, m) of count vectors.
+#' @param n Total number of trials.
+#' @return Tensor of shape (M,).
+#' @export
+log_multinom_coef <- function(X, n) {
+  torch_lgamma(torch_tensor(n + 1, device = device, dtype = dtype)) -
+    torch_lgamma(X + 1)$sum(dim = 2L)
+}
+
+
 #' All valid count vectors for a multinomial with m categories (GPU)
 #'
 #' Enumerates every integer vector (x_1, ..., x_m) with x_i >= 0 and
@@ -55,9 +66,7 @@ build_counts_tensor <- function(n, m = 3) {
 #' @return Tensor of shape (M, C) of log PMF values.
 #' @export
 mnom_logpmf <- function(X, log_comp_probs_t, n) {
-  const <- torch_lgamma(torch_tensor(n + 1, device = device, dtype = dtype))
-  lgamma_sum <- torch_lgamma(X + 1)$sum(dim = 2, keepdim = TRUE) # (M, 1)
-  const - lgamma_sum + matmul_0_ninf(X, log_comp_probs_t) # (M, C)
+  log_multinom_coef(X, n)$unsqueeze(2) + matmul_0_ninf(X, log_comp_probs_t) # (M, C)
 }
 
 #' Multinomial likelihood interface for RIPr
@@ -93,12 +102,7 @@ make_multinomial_likelihood <- function(n, K) {
   X_mat_gpu <- X_tensor$to(device = device, dtype = dtype)
   M <- X_mat_gpu$size(1L)
 
-  log_base_gpu <- torch_lgamma(torch_tensor(
-    n + 1L,
-    device = device,
-    dtype = dtype
-  )) -
-    torch_lgamma(X_mat_gpu + 1)$sum(dim = 2L)
+  log_base_gpu <- log_multinom_coef(X_mat_gpu, n) # (M,)
 
   log_pmf <- function(theta) {
     lt <- torch_tensor(log(theta), device = device, dtype = dtype)

@@ -44,12 +44,7 @@ face_vertices <- function(j, K) {
   })
   vertices <- lapply(subsets, function(S) {
     v <- numeric(K)
-    val <- 1 / (length(S) + 2L)
-    v[1L] <- val
-    v[j] <- val
-    for (k in S) {
-      v[k] <- val
-    }
+    v[c(1L, j, S)] <- 1 / (length(S) + 2L)
     v
   })
   do.call(cbind, vertices)

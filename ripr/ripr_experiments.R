@@ -1,4 +1,5 @@
 box::use(
+  stats[rgamma],
   ripr / mixture[discrete_simplex_mixture, n_categories],
   ripr /
     plurality_geometry[plurality_face_descriptors],
@@ -6,63 +7,88 @@ box::use(
   ripr / ripr_optimiser[run_ripr, fw_gap]
 )
 
+#' Sample random atoms on the null boundary faces via uniform Dirichlet draws.
+#'
+#' Atoms are distributed cyclically across faces (first atom on face 1, second
+#' on face 2, ..., wrapping around). Useful for constructing `init_atoms` /
+#' `init_atom_faces` to pass to [run_ripr()], e.g. for a pure-EM experiment.
+#'
+#' @param face_descriptors List of face descriptor closures.
+#' @param n_atoms Integer. Total number of atoms to generate.
+#' @return Named list with:
+#'   - `atoms`: K × n_atoms numeric matrix (each column is one atom).
+#'   - `faces`: integer vector of length n_atoms with 1-based face indices.
+#' @export
+sample_dirichlet_atoms <- function(face_descriptors, n_atoms) {
+  n_faces <- length(face_descriptors)
+  face_idx <- ((seq_len(n_atoms) - 1L) %% n_faces) + 1L
+  atom_list <- lapply(seq_len(n_atoms), function(i) {
+    fd <- face_descriptors[[face_idx[i]]]
+    alpha <- rgamma(fd$n_vertices, shape = 1)
+    fd$parametrise(alpha / sum(alpha))
+  })
+  list(atoms = do.call(cbind, atom_list), faces = face_idx)
+}
+
 #' RIPr optimiser for K-candidate plurality audits (multinomial)
 #'
 #' Convenience wrapper around [run_ripr()] for the standard plurality audit
-#' setting: constructs plurality null boundary face descriptors via
-#' [plurality_face_descriptors()] and a multinomial likelihood via
-#' [make_multinomial_likelihood()], runs the Frank-Wolfe + EM optimiser, and
-#' returns the result as a `discrete_simplex_mixture`.
+#' setting. Constructs the plurality null boundary and multinomial likelihood,
+#' resolves `init` into `init_atoms` / `init_atom_faces`, then delegates to
+#' [run_ripr()] via `...`.
 #'
 #' @param n Integer. Total ballot count.
 #' @param q A `simplex_mixture` — the numerator distribution Q. `K` is inferred
 #'   from `n_categories(q)`.
-#' @param max_atoms Integer. Total atom budget, including the K-1 initial atoms
-#'   (one per face). Default `NULL`, i.e. K-1.
-#' @param n_seeds Integer. Random Dirichlet seeds per face for the oracle. Default: 200.
-#' @param kl_atol Absolute tolerance for EM convergence. Default 1e-12.
-#' @param kl_rtol Relative tolerance for EM convergence. Default 1e-6.
-#' @param gap_tol Numeric. Outer loop stops when the expected likelihood ratio
-#' falls below this threshold (plus 1L). Default: 1e-6.
-#' @param em_iters Integer. Maximum EM refinement iterations per Frank-Wolfe
-#'   step. EM stops early when the KL decrease drops below
-#'   `kl_atol` + `kl_rtol * abs(KL)`. Default: 3.
-#' @param verbose Logical. Print per-iteration progress. Default: `TRUE`.
+#' @param fw_iters Integer. Number of Frank-Wolfe iterations (passed to
+#'   [run_ripr()]). Set to 0L for pure EM.
+#' @param em_iters Integer. Max EM iterations per outer step (passed to
+#'   [run_ripr()]). Set to 0L to skip EM.
+#' @param init Controls atom initialisation:
+#'   - `NULL` (default): one atom per face projected from q's mode (or mean if
+#'     mode is NA).
+#'   - A positive integer `l`: generates `l` random uniform-Dirichlet atoms
+#'     across faces via [sample_dirichlet_atoms()].
+#'   - A named list with `atoms` (K × l matrix) and `faces` (integer vector):
+#'     uses these directly.
+#' @param ... Further arguments passed to [run_ripr()] (e.g. `pairwise`,
+#'   `line_search`, `gap_tol`, `verbose`, …).
 #' @return List with:
 #'   - `mixture`: a `discrete_simplex_mixture` with atoms on the null boundary.
-#'   - `history`: the `outer_history` data.frame from [run_ripr()] (one row per
-#'     outer iteration).
+#'   - `history`: the `outer_history` data.frame from [run_ripr()].
 #'   - `kl_trace`: the per-step KL trace data.frame from [run_ripr()].
 #'   - `E_star`: terminal FW gap value (max E_theta[Q / P_w]).
 #'   - `theta_star`: terminal maximising theta.
 #'   - `converged`: `TRUE` if the FW gap fell below `gap_tol`.
 #' @export
-run_plurality_ripr <- function(
-  n,
-  q,
-  max_atoms = NULL,
-  n_seeds = 200L,
-  em_iters = 3L,
-  kl_atol = 1e-12,
-  kl_rtol = 1e-6,
-  gap_tol = 1e-6,
-  verbose = TRUE
-) {
+run_plurality_ripr <- function(n, q, fw_iters, em_iters, init = NULL, ...) {
   K <- n_categories(q)
   face_descriptors <- plurality_face_descriptors(K)
   likelihood <- make_multinomial_likelihood(n, K)
+
+  if (is.null(init)) {
+    q_ref <- if (anyNA(q@mode)) q@mean else q@mode
+    init_data <- list(
+      atoms = do.call(cbind, lapply(face_descriptors, function(fd) fd$init_point(q_ref))),
+      faces = seq_along(face_descriptors)
+    )
+  } else if (is.numeric(init) && length(init) == 1L) {
+    init_data <- sample_dirichlet_atoms(face_descriptors, as.integer(init))
+  } else if (is.list(init)) {
+    init_data <- init
+  } else {
+    stop("`init` must be NULL, a positive integer, or a list with `atoms` and `faces`.")
+  }
 
   result <- run_ripr(
     face_descriptors = face_descriptors,
     likelihood = likelihood,
     q = q,
-    max_atoms = max_atoms,
-    n_seeds = n_seeds,
+    init_atoms = init_data$atoms,
+    init_atom_faces = init_data$faces,
+    fw_iters = fw_iters,
     em_iters = em_iters,
-    kl_atol = kl_atol,
-    kl_rtol = kl_rtol,
-    gap_tol = gap_tol,
-    verbose = verbose
+    ...
   )
 
   list(
@@ -71,10 +97,10 @@ run_plurality_ripr <- function(
       weights = result$weights,
       n = n
     ),
-    history = result$outer_history,
+    history = result$history,
     kl_trace = result$kl_trace,
-    E_star = result$E_star,
-    theta_star = result$theta_star,
+    gap = result$gap,
+    oracle_theta = result$oracle_theta,
     converged = result$converged
   )
 }

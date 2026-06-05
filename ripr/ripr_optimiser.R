@@ -506,11 +506,12 @@ run_em_step <- function(
 #' @param ls_tol Line-search tolerance. Default 1e-12.
 #' @param removal_thresh Weight threshold below which the worst atom is fully
 #'   replaced in-place by the new FW atom (pairwise mode only). Default 1e-8.
-#' @param pairwise Use pairwise (vertex-exchange) FW steps (default TRUE). With
-#'   pairwise FW some iterations replace rather than add atoms, so the final
-#'   atom count may be less than `ncol(init_atoms) + fw_iters`.
-#' @param line_search When `pairwise = FALSE`, use exact line search for the
-#'   step size (default TRUE). When FALSE uses fixed schedule gamma = 2/(k+2).
+#' @param fw_variant Frank-Wolfe variant: `"pairwise"` (default), `"linesearch"`,
+#'   or `"standard"`. `"pairwise"` uses vertex-exchange steps (some iterations
+#'   replace rather than add atoms, so final atom count may be less than
+#'   `ncol(init_atoms) + fw_iters`). `"linesearch"` uses standard FW with an
+#'   exact 1-D line search. `"standard"` uses the fixed schedule
+#'   gamma = 2/(k+2).
 #' @param verbose Print per-iteration progress. Default TRUE. Each outer
 #'   iteration prints: `Gap` (FW duality gap = E_star - 1), `KL` (current KL
 #'   divergence, with delta showing change since the previous iteration), `ULB`
@@ -546,8 +547,7 @@ run_ripr <- function(
   gap_tol = 1e-8,
   ls_tol = 1e-12,
   removal_thresh = 1e-8,
-  pairwise = TRUE,
-  line_search = TRUE,
+  fw_variant = c("pairwise", "linesearch", "standard"),
   verbose = TRUE
 ) {
   n_init <- ncol(init_atoms)
@@ -575,15 +575,8 @@ run_ripr <- function(
     )
   }
 
-  fw_mode <- if (fw_iters == 0L) {
-    "em-only"
-  } else if (pairwise) {
-    "pairwise-FW"
-  } else if (line_search) {
-    "FW+line-search"
-  } else {
-    "FW+fixed-step"
-  }
+  fw_variant <- match.arg(fw_variant)
+  fw_mode <- if (fw_iters == 0L) "em-only" else fw_variant
 
   if (verbose) {
     message(sprintf(
@@ -652,7 +645,7 @@ run_ripr <- function(
     # FW step — uses fw$best_theta from the oracle at end of previous phase
     log_tm_new <- likelihood$log_pmf(fw$best_theta)
 
-    if (pairwise) {
+    if (fw_variant == "pairwise") {
       e_ratios <- workspace$compute_e_ratios(log_Pw_gpu)
       active_idx <- which(weights > removal_thresh)
       k_worst <- active_idx[which.min(e_ratios[active_idx])]
@@ -683,7 +676,7 @@ run_ripr <- function(
         workspace$add_atom_col(fw$best_theta)
         prop_star <- alpha_star / w_worst
       }
-    } else if (line_search) {
+    } else if (fw_variant == "linesearch") {
       eps_star <- fw_line_search(log_Pw_gpu, log_tm_new, workspace$q_mass_gpu, tol = ls_tol)
       weights <- c(weights * (1 - eps_star), eps_star)
       atoms <- c(atoms, list(fw$best_theta))

@@ -51,8 +51,8 @@ sample_dirichlet_atoms <- function(face_descriptors, n_atoms) {
 #'     across faces via [sample_dirichlet_atoms()].
 #'   - A named list with `atoms` (K × l matrix) and `faces` (integer vector):
 #'     uses these directly.
-#' @param ... Further arguments passed to [run_ripr()] (e.g. `pairwise`,
-#'   `line_search`, `gap_tol`, `verbose`, …).
+#' @param ... Further arguments passed to [run_ripr()] (e.g. `fw_variant`,
+#'   `gap_tol`, `verbose`, …).
 #' @return List with:
 #'   - `mixture`: a `discrete_simplex_mixture` with atoms on the null boundary.
 #'   - `history`: the `outer_history` data.frame from [run_ripr()].

@@ -598,7 +598,9 @@ run_ripr <- function(
   # --- Initialisation ---
   atoms <- lapply(seq_len(n_init), function(j) init_atoms[, j])
   atom_face_idx <- init_atom_faces
-  for (th in atoms) workspace$add_atom_col(th)
+  for (th in atoms) {
+    workspace$add_atom_col(th)
+  }
   weights <- rep(1 / n_init, n_init)
   kl <- workspace$kl_loss_and_grad(weights)$loss
   record_trace(0L, "init", workspace$n_live(), kl)
@@ -606,13 +608,22 @@ run_ripr <- function(
   # --- Initial EM ---
   if (em_iters > 0L) {
     em_result <- run_em_step(
-      workspace, face_descriptors, likelihood,
-      weights, atoms, atom_face_idx,
-      em_iters, kl_atol, kl_rtol, kl
+      workspace,
+      face_descriptors,
+      likelihood,
+      weights,
+      atoms,
+      atom_face_idx,
+      em_iters,
+      kl_atol,
+      kl_rtol,
+      kl
     )
     weights <- em_result$weights
     atoms <- em_result$atoms
-    for (kl_em in em_result$kl_trace) record_trace(0L, "em", workspace$n_live(), kl_em)
+    for (kl_em in em_result$kl_trace) {
+      record_trace(0L, "em", workspace$n_live(), kl_em)
+    }
     kl <- em_result$kl
   }
 
@@ -621,28 +632,46 @@ run_ripr <- function(
   oracle_theta <- NULL
   converged <- FALSE
   log_Pw_gpu <- workspace$compute_log_Pw_gpu(weights)
-  fw <- fw_oracle(face_descriptors, likelihood, workspace$log_q_mass_gpu, log_Pw_gpu, n_seeds)
+  fw <- fw_oracle(
+    face_descriptors,
+    likelihood,
+    workspace$log_q_mass_gpu,
+    log_Pw_gpu,
+    n_seeds
+  )
   gap <- fw$E_star - 1
   oracle_theta <- fw$best_theta
   kl_ulb <- kl - gap
   outer_rows[[1L]] <- data.frame(
-    iter = 0L, face_idx = fw$best_fi, gap = gap,
-    eps_star = NA_real_, prop_star = NA_real_,
-    kl_after_fw = NA_real_, kl_after_em = kl, kl_ulb = kl_ulb,
+    iter = 0L,
+    face_idx = fw$best_fi,
+    gap = gap,
+    eps_star = NA_real_,
+    prop_star = NA_real_,
+    kl_after_fw = NA_real_,
+    kl_after_em = kl,
+    kl_ulb = kl_ulb,
     elapsed_s = proc.time()[["elapsed"]] - t_start
   )
   if (verbose) {
     message(sprintf(
       "Init [%d atoms]: Gap %e, KL %e, ULB %e",
-      workspace$n_live(), gap, kl, kl_ulb
+      workspace$n_live(),
+      gap,
+      kl,
+      kl_ulb
     ))
   }
-  if (gap < gap_tol) converged <- TRUE
+  if (gap < gap_tol) {
+    converged <- TRUE
+  }
 
   # --- FW loop ---
   kl_prev <- kl
   for (fw_idx in seq_len(fw_iters)) {
-    if (converged) break
+    if (converged) {
+      break
+    }
 
     # FW step — uses fw$best_theta from the oracle at end of previous phase
     log_tm_new <- likelihood$log_pmf(fw$best_theta)
@@ -653,9 +682,12 @@ run_ripr <- function(
       k_worst <- active_idx[which.min(e_ratios[active_idx])]
       w_worst <- weights[k_worst]
       alpha_star <- pairwise_line_search(
-        log_Pw_gpu, log_tm_new,
-        workspace$lc_col(k_worst), w_worst,
-        workspace$q_mass_gpu, tol = ls_tol
+        log_Pw_gpu,
+        log_tm_new,
+        workspace$lc_col(k_worst),
+        w_worst,
+        workspace$q_mass_gpu,
+        tol = ls_tol
       )
       if (alpha_star == 0) {
         warning(sprintf(
@@ -679,7 +711,12 @@ run_ripr <- function(
         prop_star <- alpha_star / w_worst
       }
     } else if (fw_variant == "linesearch") {
-      eps_star <- fw_line_search(log_Pw_gpu, log_tm_new, workspace$q_mass_gpu, tol = ls_tol)
+      eps_star <- fw_line_search(
+        log_Pw_gpu,
+        log_tm_new,
+        workspace$q_mass_gpu,
+        tol = ls_tol
+      )
       weights <- c(weights * (1 - eps_star), eps_star)
       atoms <- c(atoms, list(fw$best_theta))
       atom_face_idx <- c(atom_face_idx, fw$best_fi)
@@ -700,13 +737,22 @@ run_ripr <- function(
     # EM refinement
     if (em_iters > 0L) {
       em_result <- run_em_step(
-        workspace, face_descriptors, likelihood,
-        weights, atoms, atom_face_idx,
-        em_iters, kl_atol, kl_rtol, kl_after_fw
+        workspace,
+        face_descriptors,
+        likelihood,
+        weights,
+        atoms,
+        atom_face_idx,
+        em_iters,
+        kl_atol,
+        kl_rtol,
+        kl_after_fw
       )
       weights <- em_result$weights
       atoms <- em_result$atoms
-      for (kl_em in em_result$kl_trace) record_trace(fw_idx, "em", workspace$n_live(), kl_em)
+      for (kl_em in em_result$kl_trace) {
+        record_trace(fw_idx, "em", workspace$n_live(), kl_em)
+      }
       kl <- em_result$kl
     } else {
       kl <- kl_after_fw
@@ -714,23 +760,39 @@ run_ripr <- function(
 
     # Oracle — single call per iteration; result used for next iteration's FW step
     log_Pw_gpu <- workspace$compute_log_Pw_gpu(weights)
-    fw <- fw_oracle(face_descriptors, likelihood, workspace$log_q_mass_gpu, log_Pw_gpu, n_seeds)
+    fw <- fw_oracle(
+      face_descriptors,
+      likelihood,
+      workspace$log_q_mass_gpu,
+      log_Pw_gpu,
+      n_seeds
+    )
     gap <- fw$E_star - 1
     oracle_theta <- fw$best_theta
     kl_ulb <- max(kl_ulb, kl - gap)
     outer_rows[[length(outer_rows) + 1L]] <- data.frame(
-      iter = fw_idx, face_idx = fw$best_fi, gap = gap,
+      iter = fw_idx,
+      face_idx = fw$best_fi,
+      gap = gap,
       eps_star = eps_star,
       prop_star = if (is.na(prop_star)) NA_real_ else prop_star,
-      kl_after_fw = kl_after_fw, kl_after_em = kl, kl_ulb = kl_ulb,
+      kl_after_fw = kl_after_fw,
+      kl_after_em = kl,
+      kl_ulb = kl_ulb,
       elapsed_s = proc.time()[["elapsed"]] - t_start
     )
     if (verbose) {
       message(sprintf(
         "Iter %d [%d atoms]: Gap %e, KL %e (delta %.1e), ULB %e, KL-ULB %e, alpha* %.2e, prop* %.2f",
-        fw_idx, workspace$n_live(),
-        gap, kl, kl_prev - kl, kl_ulb, kl - kl_ulb,
-        eps_star, if (is.na(prop_star)) NaN else prop_star
+        fw_idx,
+        workspace$n_live(),
+        gap,
+        kl,
+        kl_prev - kl,
+        kl_ulb,
+        kl - kl_ulb,
+        eps_star,
+        if (is.na(prop_star)) NaN else prop_star
       ))
     }
     if (gap < gap_tol) {
@@ -738,7 +800,9 @@ run_ripr <- function(
       if (verbose) {
         message(sprintf(
           "Converged after %d FW iterations (gap = %e, kl = %e).",
-          fw_idx, gap, kl
+          fw_idx,
+          gap,
+          kl
         ))
       }
     }

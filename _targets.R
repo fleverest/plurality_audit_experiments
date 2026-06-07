@@ -1,5 +1,7 @@
 library(targets)
+library(crew)
 library(crew.cluster)
+library(nanonext)
 
 box::use(
   ripr / mixture[discrete_simplex_mixture, truncated_dirichlet],
@@ -11,9 +13,9 @@ box::use(
   grand_prix / martingale_sequences[run_martingale],
   grand_prix / plot_utils[build_sim_long, plot_mean_martingales]
 )
-source("grand_prix/ui_mart.R")
-source("grand_prix/im_mart.R")
-source("grand_prix/ripr_mart.R")
+# source("grand_prix/ui_mart.R")
+# source("grand_prix/im_mart.R")
+# source("grand_prix/ripr_mart.R")
 
 # Second IP address is reachable from other compute nodes on M3
 is_m3 <- grepl("m3", Sys.info()[["nodename"]])
@@ -22,13 +24,13 @@ gpu_controller <- if (!is_m3) {
 } else {
   crew_controller_slurm(
     name = "gpu",
-    host = nanonext::ip_addr()[2L],
+    host = ip_addr()[2L],
     workers = 2L, # QOSMaxGRESPerUser is 2 for me
     options_cluster = crew_options_slurm(
       partition = "gpu",
       time_minutes = 240L,
-      log_output = "logs/crew_%A_%a.out",
-      log_error = "logs/crew_%A_%a.err",
+      log_output = "logs/crew_gpu_%A_%a.out",
+      log_error = "logs/crew_gpu_%A_%a.err",
       script_lines = c(
         "#SBATCH --gres=gpu:A100:1",
         "module load r cuda/12.6"
@@ -37,73 +39,165 @@ gpu_controller <- if (!is_m3) {
   )
 }
 
+cpu_controller <- if (!is_m3) {
+  crew_controller_local(workers = 4L)
+} else {
+  crew_controller_slurm(
+    name = "cpu",
+    host = ip_addr()[2L],
+    workers = 95L, # My QOS allows 100 jobs, but leave some headroom for the controller and gpu jobs, plus an interactive job or two.
+    seconds_idle = 120L,
+    options_cluster = crew_options_slurm(
+      partition = "comp", # your CPU partition
+      cpus_per_task = 1L,
+      memory_gigabytes_per_cpu = 10, # MaxTRESPU is 1TB total
+      time_minutes = 60L,
+      log_output = "logs/crew_cpu_%A_%a.out",
+      log_error = "logs/crew_cpu_%A_%a.err",
+      script_lines = "module load r"
+    )
+  )
+}
+
 tar_option_set(
   seed = 20260516L,
-  controller = gpu_controller
+  controller = crew_controller_group(cpu_controller, gpu_controller),
+  resources = tar_resources(
+    crew = tar_resources_crew(controller = "cpu")
+  )
 )
 
 
 list(
+  # -------------------------------------------------------------------------
+  # Algorithm comparison experiment: pure EM vs pure FW (all variants) vs hybrid.
+  # Pure EM sweeps random initialisations (1–20 atoms); pure FW and hybrid run
+  # all fw_iters steps with gap_tol = 0 to prevent early stopping.
+  # -------------------------------------------------------------------------
   tar_target(
-    max_n,
-    5L
+    algo_comparison_n,
+    10L
   ),
 
-  tar_target(n_vals, as.list(seq_len(max_n))),
-
-  # Alternative distributions Q used as the numerator in each martingale.
-  # Both point and Dirichlet mixture variants are included for comparison.
-  # InfimumMartingale only runs for point alternatives (single-atom mixture_mnom).
   tar_target(
-    sim_Q,
+    algo_comparison_maxiters,
+    50L
+  ),
+
+  tar_target(
+    algo_comparison_Q,
     list(
       list(
-        name = "point_754",
+        name = "point_543",
         K = 3L,
-        Q = discrete_simplex_mixture(as.matrix(c(7 / 16, 5 / 16, 4 / 16)), 1)
+        Q = discrete_simplex_mixture(as.matrix(5:3 / sum(5:3)), 1)
       ),
       list(
-        name = "dirichlet_754",
+        name = "dirichlet_543",
         K = 3L,
-        Q = truncated_dirichlet(c(7, 5, 4))
+        Q = truncated_dirichlet(5:3)
       ),
       list(
-        name = "point_855",
-        K = 3L,
-        Q = discrete_simplex_mixture(as.matrix(c(8 / 18, 5 / 18, 5 / 18)), 1)
-      ),
-      list(
-        name = "dirichlet_855",
-        K = 3L,
-        Q = truncated_dirichlet(c(8, 5, 5))
-      ),
-      list(
-        name = "point_7531",
+        name = "point_5432",
         K = 4L,
         Q = discrete_simplex_mixture(
-          as.matrix(c(7 / 16, 5 / 16, 3 / 16, 1 / 16)),
+          as.matrix(5:2 / sum(5:2)),
           1
         )
       ),
       list(
-        name = "dirichlet_7531",
+        name = "dirichlet_5432",
         K = 4L,
-        Q = truncated_dirichlet(c(7, 5, 3, 1))
+        Q = truncated_dirichlet(5:2)
       ),
       list(
-        name = "point_8444",
-        K = 4L,
+        name = "point_54321",
+        K = 5L,
         Q = discrete_simplex_mixture(
-          as.matrix(c(8 / 20, 4 / 20, 4 / 20, 4 / 20)),
+          as.matrix(5:1 / sum(5:1)),
           1
         )
       ),
       list(
-        name = "dirichlet_8444",
-        K = 4L,
-        Q = truncated_dirichlet(c(8, 4, 4, 4))
+        name = "dirichlet_54321",
+        K = 5L,
+        Q = truncated_dirichlet(5:1)
+      ),
+      list(
+        name = "point_654321",
+        K = 6L,
+        Q = discrete_simplex_mixture(
+          as.matrix(6:1 / sum(6:1)),
+          1
+        )
+      ),
+      list(
+        name = "dirichlet_654321",
+        K = 6L,
+        Q = truncated_dirichlet(c(6, 5, 4, 3, 2, 1))
       )
     )
+  ),
+
+  tar_target(
+    algo_comparison_configs,
+    c(
+      lapply(seq_len(algo_comparison_maxiters), function(l) {
+        list(
+          name = "em_only",
+          fw_iters = 0L,
+          em_iters = 1000L,
+          init = l,
+          kl_atol = 1e-12,
+          kl_rtol = 1e-9
+        )
+      }),
+      lapply(c("pairwise", "linesearch", "standard"), function(v) {
+        list(
+          name = paste0("fw_", v),
+          fw_iters = algo_comparison_maxiters,
+          em_iters = 0L,
+          fw_variant = v,
+          gap_tol = 0,
+          init = NULL
+        )
+      }),
+      list(list(
+        name = "hybrid",
+        fw_iters = algo_comparison_maxiters,
+        em_iters = 10L, # Arbitrary but illustrates improvement over pure variants.
+        fw_variant = "pairwise",
+        gap_tol = 0,
+        init = NULL
+      ))
+    )
+  ),
+
+  tar_target(
+    algo_comparison,
+    {
+      q_info <- algo_comparison_Q[[1L]]
+      cfg <- algo_comparison_configs[[1L]]
+      args <- c(
+        list(q = q_info$Q, n = algo_comparison_n),
+        cfg[setdiff(names(cfg), c("name"))],
+      )
+      result <- do.call(run_plurality_ripr, args)
+      # Rewrite iter for em_only to reflect the number of atoms rather than steps.
+      if (cfg$name == "em_only") {
+        result$history$iter <- cfg$init
+      }
+      result$history$Q_name <- q_info$name
+      result$history$algo <- cfg$name
+      result$history
+    },
+    pattern = cross(algo_comparison_configs, algo_comparison_Q),
+    iteration = "list"
+  ),
+
+  tar_target(
+    algos_df,
+    do.call(rbind, algo_comparison)
   ),
 
   # -------------------------------------------------------------------------
@@ -112,32 +206,88 @@ list(
   # the GPU if available. The resulting P_W's are then used in the BatchRIPr
   # target below, which runs on the CPU but is much faster.
   # -------------------------------------------------------------------------
-  tar_target(
-    sim_ripr_optimal,
-    {
-      q_opt <- sim_Q[[1L]]
-      n <- n_vals[[1L]]
-      result <- run_plurality_ripr(
-        n = n,
-        q = q_opt$Q,
-        fw_iters = 25L,
-        em_iters = 10L,
-        verbose = TRUE,
-        gap_tol = 1e-4,
-        kl_atol = 1e-12,
-        kl_rtol = 1e-8
-      )
-      list(
-        Q_name = q_opt$name,
-        K = q_opt$K,
-        Q = q_opt$Q,
-        P_W = result$mixture,
-        e_ratio = result$gap
-      )
-    },
-    pattern = cross(sim_Q, n_vals),
-    iteration = "list"
-  ),
+  # tar_target(
+  #   max_n,
+  #   100L
+  # ),
+  # tar_target(n_vals, as.list(seq_len(max_n))),
+  # # Alternative distributions Q used as the numerator in each martingale.
+  # # Both point and Dirichlet mixture variants are included for comparison.
+  # # InfimumMartingale only runs for point alternatives (single-atom mixture_mnom).
+  # tar_target(
+  #   sim_Q,
+  #   list(
+  #     list(
+  #       name = "point_754",
+  #       K = 3L,
+  #       Q = discrete_simplex_mixture(as.matrix(c(7 / 16, 5 / 16, 4 / 16)), 1)
+  #     ),
+  #     list(
+  #       name = "dirichlet_754",
+  #       K = 3L,
+  #       Q = truncated_dirichlet(c(7, 5, 4))
+  #     ),
+  #     list(
+  #       name = "point_855",
+  #       K = 3L,
+  #       Q = discrete_simplex_mixture(as.matrix(c(8 / 18, 5 / 18, 5 / 18)), 1)
+  #     ),
+  #     list(
+  #       name = "dirichlet_855",
+  #       K = 3L,
+  #       Q = truncated_dirichlet(c(8, 5, 5))
+  #     ),
+  #     list(
+  #       name = "point_7531",
+  #       K = 4L,
+  #       Q = discrete_simplex_mixture(
+  #         as.matrix(c(7 / 16, 5 / 16, 3 / 16, 1 / 16)),
+  #         1
+  #       )
+  #     ),
+  #     list(
+  #       name = "dirichlet_7531",
+  #       K = 4L,
+  #       Q = truncated_dirichlet(c(7, 5, 3, 1))
+  #     ),
+  #     list(
+  #       name = "point_8444",
+  #       K = 4L,
+  #       Q = discrete_simplex_mixture(
+  #         as.matrix(c(8 / 20, 4 / 20, 4 / 20, 4 / 20)),
+  #         1
+  #       )
+  #     ),
+  #     list(
+  #       name = "dirichlet_8444",
+  #       K = 4L,
+  #       Q = truncated_dirichlet(c(8, 4, 4, 4))
+  #     )
+  #   )
+  # ),
+  # tar_target(
+  #   sim_ripr_optimal,
+  #   {
+  #     q_opt <- sim_Q[[1L]]
+  #     n <- n_vals[[1L]]
+  #     result <- run_plurality_ripr(
+  #       n = n,
+  #       q = q_opt$Q,
+  #       fw_iters = 25L,
+  #       em_iters = 10L,
+  #       verbose = TRUE
+  #     )
+  #     list(
+  #       Q_name = q_opt$name,
+  #       K = q_opt$K,
+  #       Q = q_opt$Q,
+  #       P_W = result$mixture,
+  #       e_ratio = result$gap
+  #     )
+  #   },
+  #   pattern = cross(sim_Q, n_vals),
+  #   iteration = "list"
+  # ),
 
   # # --------------------------------------------------------------------------
   # # Grand Prix: comparison of UITest, InfimumMartingale, BatchRIPr martingales.

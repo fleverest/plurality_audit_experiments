@@ -560,6 +560,7 @@ run_ripr <- function(
   }
 
   workspace <- make_ripr_workspace(likelihood, q, n_init + fw_iters)
+  t_start <- proc.time()[["elapsed"]]
 
   # --- History accumulators ---
   trace_rows <- list()
@@ -627,7 +628,8 @@ run_ripr <- function(
   outer_rows[[1L]] <- data.frame(
     iter = 0L, face_idx = fw$best_fi, gap = gap,
     eps_star = NA_real_, prop_star = NA_real_,
-    kl_after_fw = NA_real_, kl_after_em = kl, kl_ulb = kl_ulb
+    kl_after_fw = NA_real_, kl_after_em = kl, kl_ulb = kl_ulb,
+    elapsed_s = proc.time()[["elapsed"]] - t_start
   )
   if (verbose) {
     message(sprintf(
@@ -720,7 +722,8 @@ run_ripr <- function(
       iter = fw_idx, face_idx = fw$best_fi, gap = gap,
       eps_star = eps_star,
       prop_star = if (is.na(prop_star)) NA_real_ else prop_star,
-      kl_after_fw = kl_after_fw, kl_after_em = kl, kl_ulb = kl_ulb
+      kl_after_fw = kl_after_fw, kl_after_em = kl, kl_ulb = kl_ulb,
+      elapsed_s = proc.time()[["elapsed"]] - t_start
     )
     if (verbose) {
       message(sprintf(

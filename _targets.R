@@ -139,7 +139,8 @@ list(
           em_iters = 1000L,
           init = l,
           kl_atol = 1e-12,
-          kl_rtol = 1e-9
+          kl_rtol = 1e-9,
+          verbose = TRUE
         )
       }),
       lapply(c("pairwise", "linesearch", "standard"), function(v) {
@@ -149,7 +150,8 @@ list(
           em_iters = 0L,
           fw_variant = v,
           gap_tol = 0,
-          init = NULL
+          init = NULL,
+          verbose = TRUE
         )
       }),
       list(list(
@@ -158,7 +160,8 @@ list(
         em_iters = 10L, # Arbitrary but illustrates improvement over pure variants.
         fw_variant = "pairwise",
         gap_tol = 0,
-        init = NULL
+        init = NULL,
+        verbose = TRUE
       ))
     )
   ),
@@ -188,7 +191,129 @@ list(
 
   tar_target(
     algos_df,
-    do.call(rbind, algo_comparison)
+    {
+      box::use(dplyr[filter, summarise, group_by, left_join, mutate])
+      q_map <- c(
+        dirichlet_543 = "2-simplex (Dirichlet)",
+        dirichlet_5432 = "3-simplex (Dirichlet)",
+        dirichlet_54321 = "4-simplex (Dirichlet)",
+        dirichlet_654321 = "5-simplex (Dirichlet)",
+        point_543 = "2-simplex (point mass)",
+        point_5432 = "3-simplex (point mass)",
+        point_54321 = "4-simplex (point mass)",
+        point_654321 = "5-simplex (point mass)"
+      )
+      algo_map <- c(
+        fw_linesearch = "Line-search FW",
+        fw_pairwise = "Pairwise FW",
+        fw_standard = "Standard FW",
+        em_only = "Pure EM (random initialisation)",
+        hybrid = "Line-search FW + EM refinement"
+      )
+      algos_df <- do.call(rbind, algo_comparison)
+      y_limits <- algos_df |>
+        group_by(Q_name) |>
+        summarise(ymin = max(kl_ulb), .groups = "drop")
+      algos_df <- algos_df |>
+        left_join(y_limits, by = "Q_name") |>
+        mutate(
+          Q_label = unname(ifelse(
+            Q_name %in% names(q_map),
+            q_map[Q_name],
+            Q_name
+          )),
+          K = as.integer(sub("(\\d+).*", "\\1", Q_label)),
+          mixture_type = ifelse(
+            grepl("Dirichlet", Q_label),
+            "Dirichlet",
+            "Point mass"
+          ),
+          algo_label = unname(ifelse(
+            algo %in% names(algo_map),
+            algo_map[algo],
+            algo
+          )),
+          adj = kl_after_em - ymin,
+          log_adj = log10(adj)
+        )
+
+      algos_df
+    }
+  ),
+
+  tar_target(
+    algo_comparison_plots,
+    {
+      box::use(
+        ggplot2[ggplot, aes, geom_line, facet_wrap, labs, theme_minimal],
+        dplyr[filter, summarise, group_by, left_join, mutate],
+      )
+      list(
+        FW_KL_min_ULB = algos_df |>
+          filter(algo %in% c("fw_pairwise", "fw_linesearch", "fw_standard")) |>
+          ggplot(aes(x = iter, y = log_adj, color = algo_label)) +
+          geom_line() +
+          facet_grid(K ~ mixture_type, scales = "free_y") +
+          scale_y_continuous(expand = c(0, 0)) +
+          labs(color = "Algorithm", y = "log(KL - ULB)") +
+          ggtitle("FW variants: KL - ULB vs iteration"),
+
+        FW_gap = algos_df |>
+          filter(algo %in% c("fw_pairwise", "fw_linesearch", "fw_standard")) |>
+          ggplot(aes(x = iter, y = gap, color = algo_label)) +
+          geom_line() +
+          facet_grid(K ~ mixture_type, scales = "free_y") +
+          scale_y_log10(expand = c(0, 0)) +
+          labs(color = "Algorithm", y = "FW Gap") +
+          ggtitle("FW variants: FW Gap vs iteration"),
+
+        FW_GR = algos_df |>
+          filter(algo %in% c("fw_pairwise", "fw_linesearch", "fw_standard")) |>
+          ggplot(aes(
+            x = iter,
+            y = kl_after_em - log(1 + gap),
+            color = algo_label
+          )) +
+          geom_line() +
+          facet_grid(K ~ mixture_type, scales = "free_y") +
+          scale_y_continuous(expand = c(0, 0)) +
+          coord_cartesian(ylim = c(-0.05, NA)) +
+          labs(color = "Algorithm", y = "E[log E]") +
+          ggtitle("FW variants: E[log E] vs iteration"),
+
+        rest_KL_min_ULB = algos_df |>
+          filter(!algo %in% c("fw_pairwise", "fw_standard")) |>
+          ggplot(aes(x = iter, y = log_adj, color = algo_label)) +
+          geom_line() +
+          facet_grid(K ~ mixture_type, scales = "free_y") +
+          scale_y_continuous(expand = c(0, 0)) +
+          labs(color = "Algorithm", y = "log(KL - ULB)") +
+          ggtitle("EM comparison: KL - ULB vs iteration"),
+
+        rest_gap = algos_df |>
+          filter(!algo %in% c("fw_pairwise", "fw_standard")) |>
+          ggplot(aes(x = iter, y = gap, color = algo_label)) +
+          geom_line() +
+          facet_grid(K ~ mixture_type, scales = "free_y") +
+          scale_y_log10(expand = c(0, 0)) +
+          labs(color = "Algorithm", y = "FW Gap") +
+          ggtitle("EM comparison: FW Gap vs iteration"),
+
+        rest_GR = algos_df |>
+          filter(!algo %in% c("fw_pairwise", "fw_standard")) |>
+          ggplot(aes(
+            x = iter,
+            y = kl_after_em - log(1 + gap),
+            color = algo_label
+          )) +
+          geom_line() +
+          facet_grid(K ~ mixture_type, scales = "free_y") +
+          scale_y_continuous(expand = c(0, 0)) +
+          coord_cartesian(ylim = c(-0.05, NA)) +
+          labs(color = "Algorithm", y = "E[log E]") +
+          ggtitle("EM comparison: E[log E] vs iteration")
+      )
+    }
   ),
 
   # -------------------------------------------------------------------------

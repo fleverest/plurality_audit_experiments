@@ -3,24 +3,11 @@ library(crew)
 library(crew.cluster)
 library(nanonext)
 
-box::use(
-  ripr / mixture[discrete_simplex_mixture, truncated_dirichlet],
-  ripr / simplex_utils[simplex_lattice],
-  ripr / ripr_experiments[run_plurality_ripr],
-  # grand_prix / ui_mart[UITest],
-  # grand_prix / im_mart[InfimumMartingale],
-  # grand_prix / ripr_mart[BatchRIPr],
-  grand_prix / martingale_sequences[run_martingale],
-  grand_prix / plot_utils[build_sim_long, plot_mean_martingales]
-)
-# source("grand_prix/ui_mart.R")
-# source("grand_prix/im_mart.R")
-# source("grand_prix/ripr_mart.R")
 
 # Second IP address is reachable from other compute nodes on M3
 is_m3 <- grepl("m3", Sys.info()[["nodename"]])
 gpu_controller <- if (!is_m3) {
-  NULL
+  crew_controller_local(name = "gpu", workers = 1L)
 } else {
   crew_controller_slurm(
     name = "gpu",
@@ -40,7 +27,7 @@ gpu_controller <- if (!is_m3) {
 }
 
 cpu_controller <- if (!is_m3) {
-  crew_controller_local(workers = 4L)
+  crew_controller_local(name = "cpu", workers = 4L)
 } else {
   crew_controller_slurm(
     name = "cpu",
@@ -86,57 +73,60 @@ list(
 
   tar_target(
     algo_comparison_Q,
-    list(
+    {
+      box::use(ripr / mixture[discrete_simplex_mixture, truncated_dirichlet])
       list(
-        name = "point_543",
-        K = 3L,
-        Q = discrete_simplex_mixture(as.matrix(5:3 / sum(5:3)), 1)
-      ),
-      list(
-        name = "dirichlet_543",
-        K = 3L,
-        Q = truncated_dirichlet(5:3)
-      ),
-      list(
-        name = "point_5432",
-        K = 4L,
-        Q = discrete_simplex_mixture(
-          as.matrix(5:2 / sum(5:2)),
-          1
+        list(
+          name = "point_543",
+          K = 3L,
+          Q = discrete_simplex_mixture(as.matrix(5:3 / sum(5:3)), 1)
+        ),
+        list(
+          name = "dirichlet_543",
+          K = 3L,
+          Q = truncated_dirichlet(5:3)
+        ),
+        list(
+          name = "point_5432",
+          K = 4L,
+          Q = discrete_simplex_mixture(
+            as.matrix(5:2 / sum(5:2)),
+            1
+          )
+        ),
+        list(
+          name = "dirichlet_5432",
+          K = 4L,
+          Q = truncated_dirichlet(5:2)
+        ),
+        list(
+          name = "point_54321",
+          K = 5L,
+          Q = discrete_simplex_mixture(
+            as.matrix(5:1 / sum(5:1)),
+            1
+          )
+        ),
+        list(
+          name = "dirichlet_54321",
+          K = 5L,
+          Q = truncated_dirichlet(5:1)
+        ),
+        list(
+          name = "point_654321",
+          K = 6L,
+          Q = discrete_simplex_mixture(
+            as.matrix(6:1 / sum(6:1)),
+            1
+          )
+        ),
+        list(
+          name = "dirichlet_654321",
+          K = 6L,
+          Q = truncated_dirichlet(c(6, 5, 4, 3, 2, 1))
         )
-      ),
-      list(
-        name = "dirichlet_5432",
-        K = 4L,
-        Q = truncated_dirichlet(5:2)
-      ),
-      list(
-        name = "point_54321",
-        K = 5L,
-        Q = discrete_simplex_mixture(
-          as.matrix(5:1 / sum(5:1)),
-          1
-        )
-      ),
-      list(
-        name = "dirichlet_54321",
-        K = 5L,
-        Q = truncated_dirichlet(5:1)
-      ),
-      list(
-        name = "point_654321",
-        K = 6L,
-        Q = discrete_simplex_mixture(
-          as.matrix(6:1 / sum(6:1)),
-          1
-        )
-      ),
-      list(
-        name = "dirichlet_654321",
-        K = 6L,
-        Q = truncated_dirichlet(c(6, 5, 4, 3, 2, 1))
       )
-    )
+    }
   ),
 
   tar_target(
@@ -176,11 +166,12 @@ list(
   tar_target(
     algo_comparison,
     {
+      box::use(ripr / ripr_experiments[run_plurality_ripr])
       q_info <- algo_comparison_Q[[1L]]
       cfg <- algo_comparison_configs[[1L]]
       args <- c(
         list(q = q_info$Q, n = algo_comparison_n),
-        cfg[setdiff(names(cfg), c("name"))],
+        cfg[setdiff(names(cfg), c("name"))]
       )
       result <- do.call(run_plurality_ripr, args)
       # Rewrite iter for em_only to reflect the number of atoms rather than steps.
@@ -216,54 +207,57 @@ list(
   # # InfimumMartingale only runs for point alternatives (single-atom mixture_mnom).
   # tar_target(
   #   sim_Q,
-  #   list(
+  #   {
+  #     box::use(ripr / mixture[discrete_simplex_mixture, truncated_dirichlet])
   #     list(
-  #       name = "point_754",
-  #       K = 3L,
-  #       Q = discrete_simplex_mixture(as.matrix(c(7 / 16, 5 / 16, 4 / 16)), 1)
-  #     ),
-  #     list(
-  #       name = "dirichlet_754",
-  #       K = 3L,
-  #       Q = truncated_dirichlet(c(7, 5, 4))
-  #     ),
-  #     list(
-  #       name = "point_855",
-  #       K = 3L,
-  #       Q = discrete_simplex_mixture(as.matrix(c(8 / 18, 5 / 18, 5 / 18)), 1)
-  #     ),
-  #     list(
-  #       name = "dirichlet_855",
-  #       K = 3L,
-  #       Q = truncated_dirichlet(c(8, 5, 5))
-  #     ),
-  #     list(
-  #       name = "point_7531",
-  #       K = 4L,
-  #       Q = discrete_simplex_mixture(
-  #         as.matrix(c(7 / 16, 5 / 16, 3 / 16, 1 / 16)),
-  #         1
+  #       list(
+  #         name = "point_754",
+  #         K = 3L,
+  #         Q = discrete_simplex_mixture(as.matrix(c(7 / 16, 5 / 16, 4 / 16)), 1)
+  #       ),
+  #       list(
+  #         name = "dirichlet_754",
+  #         K = 3L,
+  #         Q = truncated_dirichlet(c(7, 5, 4))
+  #       ),
+  #       list(
+  #         name = "point_855",
+  #         K = 3L,
+  #         Q = discrete_simplex_mixture(as.matrix(c(8 / 18, 5 / 18, 5 / 18)), 1)
+  #       ),
+  #       list(
+  #         name = "dirichlet_855",
+  #         K = 3L,
+  #         Q = truncated_dirichlet(c(8, 5, 5))
+  #       ),
+  #       list(
+  #         name = "point_7531",
+  #         K = 4L,
+  #         Q = discrete_simplex_mixture(
+  #           as.matrix(c(7 / 16, 5 / 16, 3 / 16, 1 / 16)),
+  #           1
+  #         )
+  #       ),
+  #       list(
+  #         name = "dirichlet_7531",
+  #         K = 4L,
+  #         Q = truncated_dirichlet(c(7, 5, 3, 1))
+  #       ),
+  #       list(
+  #         name = "point_8444",
+  #         K = 4L,
+  #         Q = discrete_simplex_mixture(
+  #           as.matrix(c(8 / 20, 4 / 20, 4 / 20, 4 / 20)),
+  #           1
+  #         )
+  #       ),
+  #       list(
+  #         name = "dirichlet_8444",
+  #         K = 4L,
+  #         Q = truncated_dirichlet(c(8, 4, 4, 4))
   #       )
-  #     ),
-  #     list(
-  #       name = "dirichlet_7531",
-  #       K = 4L,
-  #       Q = truncated_dirichlet(c(7, 5, 3, 1))
-  #     ),
-  #     list(
-  #       name = "point_8444",
-  #       K = 4L,
-  #       Q = discrete_simplex_mixture(
-  #         as.matrix(c(8 / 20, 4 / 20, 4 / 20, 4 / 20)),
-  #         1
-  #       )
-  #     ),
-  #     list(
-  #       name = "dirichlet_8444",
-  #       K = 4L,
-  #       Q = truncated_dirichlet(c(8, 4, 4, 4))
   #     )
-  #   )
+  #   }
   # ),
   # tar_target(
   #   sim_ripr_optimal,

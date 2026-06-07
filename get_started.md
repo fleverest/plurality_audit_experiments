@@ -2,9 +2,14 @@
 
 Here are some of the steps I had to follow to get up and running on M3.
 
-## Installing R 4.5.3 and dependencies
+1. Load R and required modules for M3:
 
 ```bash
-module load r cuda/12.6
-R -e "renv::restore(); torch::install_torch()"
+module load r/4.4.1 cuda/12.6
+```
+
+2. Install R package dependencies from source:
+
+```
+R -e "renv::restore(rebuild = TRUE); torch::install_torch()"
 ```

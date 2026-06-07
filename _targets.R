@@ -68,7 +68,7 @@ list(
 
   tar_target(
     algo_comparison_maxiters,
-    50L
+    100L
   ),
 
   tar_target(
@@ -77,27 +77,27 @@ list(
       box::use(ripr / mixture[discrete_simplex_mixture, truncated_dirichlet])
       list(
         list(
-          name = "point_543",
+          name = "point_321",
           K = 3L,
-          Q = discrete_simplex_mixture(as.matrix(5:3 / sum(5:3)), 1)
+          Q = discrete_simplex_mixture(as.matrix(3:1 / sum(3:1)), 1)
         ),
         list(
-          name = "dirichlet_543",
+          name = "dirichlet_321",
           K = 3L,
-          Q = truncated_dirichlet(5:3)
+          Q = truncated_dirichlet(3:1)
         ),
         list(
-          name = "point_5432",
+          name = "point_4321",
           K = 4L,
           Q = discrete_simplex_mixture(
-            as.matrix(5:2 / sum(5:2)),
+            as.matrix(4:1 / sum(4:1)),
             1
           )
         ),
         list(
-          name = "dirichlet_5432",
+          name = "dirichlet_4321",
           K = 4L,
-          Q = truncated_dirichlet(5:2)
+          Q = truncated_dirichlet(4:1)
         ),
         list(
           name = "point_54321",
@@ -123,7 +123,7 @@ list(
         list(
           name = "dirichlet_654321",
           K = 6L,
-          Q = truncated_dirichlet(c(6, 5, 4, 3, 2, 1))
+          Q = truncated_dirichlet(6:1)
         )
       )
     }
@@ -136,10 +136,10 @@ list(
         list(
           name = "em_only",
           fw_iters = 0L,
-          em_iters = 1000L,
+          em_iters = 2000L,
           init = l,
           kl_atol = 1e-12,
-          kl_rtol = 1e-9,
+          kl_rtol = 1e-10,
           verbose = TRUE
         )
       }),
@@ -155,10 +155,19 @@ list(
         )
       }),
       list(list(
-        name = "hybrid",
+        name = "hybrid_linesearch",
         fw_iters = algo_comparison_maxiters,
         em_iters = 10L, # Arbitrary but illustrates improvement over pure variants.
-        fw_variant = "pairwise",
+        fw_variant = "linesearch", # Arbitrary choice for the FW component of the hybrid.
+        gap_tol = 0,
+        init = NULL,
+        verbose = TRUE
+      )),
+      list(list(
+        name = "hybrid_pairwise",
+        fw_iters = algo_comparison_maxiters,
+        em_iters = 10L, # Arbitrary but illustrates improvement over pure variants.
+        fw_variant = "pairwise", # Arbitrary choice for the FW component of the hybrid.
         gap_tol = 0,
         init = NULL,
         verbose = TRUE
@@ -194,12 +203,12 @@ list(
     {
       box::use(dplyr[filter, summarise, group_by, left_join, mutate])
       q_map <- c(
-        dirichlet_543 = "2-simplex (Dirichlet)",
-        dirichlet_5432 = "3-simplex (Dirichlet)",
+        dirichlet_321 = "2-simplex (Dirichlet)",
+        dirichlet_4321 = "3-simplex (Dirichlet)",
         dirichlet_54321 = "4-simplex (Dirichlet)",
         dirichlet_654321 = "5-simplex (Dirichlet)",
-        point_543 = "2-simplex (point mass)",
-        point_5432 = "3-simplex (point mass)",
+        point_321 = "2-simplex (point mass)",
+        point_4321 = "3-simplex (point mass)",
         point_54321 = "4-simplex (point mass)",
         point_654321 = "5-simplex (point mass)"
       )
@@ -208,7 +217,8 @@ list(
         fw_pairwise = "Pairwise FW",
         fw_standard = "Standard FW",
         em_only = "Pure EM (random initialisation)",
-        hybrid = "Line-search FW + EM refinement"
+        hybrid_linesearch = "Line-search FW + EM refinement",
+        hybrid_pairwise = "Pairwise FW + EM refinement"
       )
       algos_df <- do.call(rbind, algo_comparison)
       y_limits <- algos_df |>

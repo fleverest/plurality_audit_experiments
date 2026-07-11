@@ -255,73 +255,150 @@ list(
     algo_comparison_plots,
     {
       box::use(
-        ggplot2[ggplot, aes, geom_line, facet_wrap, labs, theme_minimal],
-        dplyr[filter, summarise, group_by, left_join, mutate],
+        ggplot2[
+          ggplot,
+          aes,
+          geom_line,
+          facet_grid,
+          labs,
+          theme_minimal,
+          scale_y_continuous,
+          scale_y_log10,
+          coord_cartesian,
+          theme,
+          element_text
+        ],
+        dplyr[filter, summarise, group_by, left_join, mutate, arrange, ungroup],
       )
+
+      # Prepare data with running max of log-growth-rate
+      algos_df_with_runmax <- algos_df |>
+        group_by(algo, Q_name, mixture_type, K) |>
+        arrange(elapsed_s) |>
+        mutate(
+          log_growth_rate = kl_after_em - log(1 + gap),
+          best_log_growth = cummax(log_growth_rate),
+          K_name = paste0(K, "-simplex")
+        ) |>
+        ungroup()
+
+      # Theme with larger fonts
+      theme_larger <- function() {
+        theme_minimal() +
+          theme(
+            legend.position = "bottom",
+            axis.title = element_text(size = 18),
+            axis.text = element_text(size = 12),
+            plot.title = element_text(size = 20, hjust = 0.5),
+            strip.text = element_text(size = 15),
+            legend.text = element_text(size = 12)
+          )
+      }
+
       list(
-        FW_KL_min_ULB = algos_df |>
+        FW_KL_min_ULB = algos_df_with_runmax |>
           filter(algo %in% c("fw_pairwise", "fw_linesearch", "fw_standard")) |>
-          ggplot(aes(x = iter, y = log_adj, color = algo_label)) +
-          geom_line() +
-          facet_grid(K ~ mixture_type, scales = "free_y") +
+          ggplot(aes(x = elapsed_s, y = log_adj, color = algo_label)) +
+          geom_line(linewidth = 0.8) +
+          facet_grid(
+            K_name ~ mixture_type,
+            scales = "free_y"
+          ) +
           scale_y_continuous(expand = c(0, 0)) +
-          labs(color = "Algorithm", y = "log(KL - ULB)") +
-          ggtitle("FW variants: KL - ULB vs iteration"),
+          labs(
+            color = NULL,
+            x = "Runtime (s)",
+            y = "log(KL - ULB)",
+            title = "FW variants: convergence comparison"
+          ) +
+          theme_larger(),
 
-        FW_gap = algos_df |>
+        FW_gap = algos_df_with_runmax |>
           filter(algo %in% c("fw_pairwise", "fw_linesearch", "fw_standard")) |>
-          ggplot(aes(x = iter, y = gap, color = algo_label)) +
-          geom_line() +
-          facet_grid(K ~ mixture_type, scales = "free_y") +
+          ggplot(aes(x = elapsed_s, y = gap, color = algo_label)) +
+          geom_line(linewidth = 0.8) +
+          facet_grid(
+            K_name ~ mixture_type,
+            scales = "free_y"
+          ) +
           scale_y_log10(expand = c(0, 0)) +
-          labs(color = "Algorithm", y = "FW Gap") +
-          ggtitle("FW variants: FW Gap vs iteration"),
+          labs(
+            color = NULL,
+            x = "Runtime (s)",
+            y = "FW Gap",
+            title = "FW variants: duality gap"
+          ) +
+          theme_larger(),
 
-        FW_GR = algos_df |>
+        FW_GR = algos_df_with_runmax |>
           filter(algo %in% c("fw_pairwise", "fw_linesearch", "fw_standard")) |>
-          ggplot(aes(
-            x = iter,
-            y = kl_after_em - log(1 + gap),
-            color = algo_label
-          )) +
-          geom_line() +
-          facet_grid(K ~ mixture_type, scales = "free_y") +
+          ggplot(aes(x = elapsed_s, y = best_log_growth, color = algo_label)) +
+          geom_line(linewidth = 0.8) +
+          facet_grid(
+            K_name ~ mixture_type,
+            scales = "free_y"
+          ) +
           scale_y_continuous(expand = c(0, 0)) +
           coord_cartesian(ylim = c(-0.05, NA)) +
-          labs(color = "Algorithm", y = "E[log E]") +
-          ggtitle("FW variants: E[log E] vs iteration"),
+          labs(
+            color = NULL,
+            x = "Runtime (s)",
+            y = "Best E[log E]",
+            title = "FW variants: best log-growth-rate over time"
+          ) +
+          theme_larger(),
 
-        rest_KL_min_ULB = algos_df |>
+        rest_KL_min_ULB = algos_df_with_runmax |>
           filter(!algo %in% c("fw_pairwise", "fw_standard")) |>
-          ggplot(aes(x = iter, y = log_adj, color = algo_label)) +
-          geom_line() +
-          facet_grid(K ~ mixture_type, scales = "free_y") +
+          ggplot(aes(x = elapsed_s, y = log_adj, color = algo_label)) +
+          geom_line(linewidth = 0.8) +
+          facet_grid(
+            K_name ~ mixture_type,
+            scales = "free"
+          ) +
           scale_y_continuous(expand = c(0, 0)) +
-          labs(color = "Algorithm", y = "log(KL - ULB)") +
-          ggtitle("EM comparison: KL - ULB vs iteration"),
+          labs(
+            color = NULL,
+            x = "Runtime (s)",
+            y = "log(KL - ULB)",
+            title = "Algorithm comparison: convergence (log scale)"
+          ) +
+          theme_larger(),
 
-        rest_gap = algos_df |>
+        rest_gap = algos_df_with_runmax |>
           filter(!algo %in% c("fw_pairwise", "fw_standard")) |>
-          ggplot(aes(x = iter, y = gap, color = algo_label)) +
-          geom_line() +
-          facet_grid(K ~ mixture_type, scales = "free_y") +
+          ggplot(aes(x = elapsed_s, y = gap, color = algo_label)) +
+          geom_line(linewidth = 0.8) +
+          facet_grid(
+            K_name ~ mixture_type,
+            scales = "free"
+          ) +
           scale_y_log10(expand = c(0, 0)) +
-          labs(color = "Algorithm", y = "FW Gap") +
-          ggtitle("EM comparison: FW Gap vs iteration"),
+          labs(
+            color = NULL,
+            x = "Runtime (s)",
+            y = "FW Gap",
+            title = "Algorithm comparison: duality gap"
+          ) +
+          theme_larger(),
 
-        rest_GR = algos_df |>
+        rest_GR = algos_df_with_runmax |>
           filter(!algo %in% c("fw_pairwise", "fw_standard")) |>
-          ggplot(aes(
-            x = iter,
-            y = kl_after_em - log(1 + gap),
-            color = algo_label
-          )) +
-          geom_line() +
-          facet_grid(K ~ mixture_type, scales = "free_y") +
+          ggplot(aes(x = elapsed_s, y = best_log_growth, color = algo_label)) +
+          geom_line(linewidth = 0.8) +
+          facet_grid(
+            K_name ~ mixture_type,
+            scales = "free"
+          ) +
           scale_y_continuous(expand = c(0, 0)) +
           coord_cartesian(ylim = c(-0.05, NA)) +
-          labs(color = "Algorithm", y = "E[log E]") +
-          ggtitle("EM comparison: E[log E] vs iteration")
+          labs(
+            color = NULL,
+            x = "Runtime (s)",
+            y = "Best E[log E]",
+            title = "Algorithm comparison: best log-growth-rate over time"
+          ) +
+          theme_larger()
       )
     }
   ),

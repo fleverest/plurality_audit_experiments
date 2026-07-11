@@ -487,7 +487,7 @@ run_em_step <- function(
 #' `fw_iters` outer steps.
 #'
 #' @param face_descriptors List of face descriptors. See
-#'   [plurality_face_descriptors()].
+#'   [boundary_face_descriptors()].
 #' @param likelihood Likelihood interface. See [make_multinomial_likelihood()].
 #' @param q A `simplex_mixture` representing the numerator distribution Q.
 #' @param init_atoms K × l numeric matrix of initial atom locations on the null
@@ -512,6 +512,10 @@ run_em_step <- function(
 #'   `ncol(init_atoms) + fw_iters`). `"linesearch"` uses standard FW with an
 #'   exact 1-D line search. `"standard"` uses the fixed schedule
 #'   gamma = 2/(k+2).
+#' @param checkpoint_iters Integer vector of outer-iteration indices (0 =
+#'   post-init, before any FW step) at which to snapshot `(atoms, weights,
+#'   atom_face_idx)`. Snapshots are taken after that iteration's EM
+#'   refinement (if any). Default `NULL` records nothing.
 #' @param verbose Print per-iteration progress. Default TRUE. Each outer
 #'   iteration prints: `Gap` (FW duality gap = E_star - 1), `KL` (current KL
 #'   divergence, with delta showing change since the previous iteration), `ULB`
@@ -532,6 +536,8 @@ run_em_step <- function(
 #'   - `kl`: terminal KL divergence.
 #'   - `kl_ulb`: tightest lower bound on optimal KL seen across iterations.
 #'   - `converged`: TRUE if FW gap fell below `gap_tol`.
+#'   - `checkpoints`: list of `(iter, atoms, weights, atom_face_idx)` snapshots,
+#'       one per requested `checkpoint_iters` value actually reached.
 #' @export
 run_ripr <- function(
   face_descriptors,
@@ -548,6 +554,7 @@ run_ripr <- function(
   ls_tol = 1e-12,
   removal_thresh = 1e-8,
   fw_variant = c("pairwise", "linesearch", "standard"),
+  checkpoint_iters = NULL,
   verbose = TRUE
 ) {
   n_init <- ncol(init_atoms)
@@ -565,6 +572,7 @@ run_ripr <- function(
   # --- History accumulators ---
   trace_rows <- list()
   outer_rows <- list()
+  checkpoints <- list()
   kl_ulb <- -Inf
 
   record_trace <- function(iter, type, n_atoms, kl_val) {
@@ -573,6 +581,19 @@ run_ripr <- function(
       step_type = type,
       n_atoms = n_atoms,
       kl = kl_val
+    )
+  }
+
+  record_checkpoint <- function(iter) {
+    if (is.null(checkpoint_iters) || !(iter %in% checkpoint_iters)) {
+      return(invisible(NULL))
+    }
+    n_live <- workspace$n_live()
+    checkpoints[[length(checkpoints) + 1L]] <<- list(
+      iter = iter,
+      atoms = atoms[seq_len(n_live)],
+      weights = weights[seq_len(n_live)],
+      atom_face_idx = atom_face_idx[seq_len(n_live)]
     )
   }
 
@@ -626,6 +647,7 @@ run_ripr <- function(
     }
     kl <- em_result$kl
   }
+  record_checkpoint(0L)
 
   # --- Initial oracle ---
   gap <- NA_real_
@@ -757,6 +779,7 @@ run_ripr <- function(
     } else {
       kl <- kl_after_fw
     }
+    record_checkpoint(fw_idx)
 
     # Oracle — single call per iteration; result used for next iteration's FW step
     log_Pw_gpu <- workspace$compute_log_Pw_gpu(weights)
@@ -823,7 +846,8 @@ run_ripr <- function(
     oracle_theta = oracle_theta,
     kl = kl,
     kl_ulb = kl_ulb,
-    converged = converged
+    converged = converged,
+    checkpoints = checkpoints
   )
 }
 
@@ -836,7 +860,7 @@ run_ripr <- function(
 #'
 #' @param Q A `simplex_mixture` for the alternative distribution.
 #' @param P A `simplex_mixture` for the null mixture.
-#' @param face_descriptors List of face descriptors. See [plurality_face_descriptors()].
+#' @param face_descriptors List of face descriptors. See [boundary_face_descriptors()].
 #' @param n Integer. Multinomial sample size.
 #' @param n_seeds Integer. Random Dirichlet seeds per face. Default 200L.
 #' @return List with `E_star` (numeric) and `theta_star` (numeric vector).

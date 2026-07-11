@@ -2,7 +2,7 @@ box::use(
   stats[rgamma],
   ripr / mixture[discrete_simplex_mixture, n_categories],
   ripr /
-    plurality_geometry[plurality_face_descriptors],
+    plurality_geometry[boundary_face_descriptors],
   ripr / multinomial[make_multinomial_likelihood],
   ripr / ripr_optimiser[run_ripr, fw_gap]
 )
@@ -51,6 +51,11 @@ sample_dirichlet_atoms <- function(face_descriptors, n_atoms) {
 #'     across faces via [sample_dirichlet_atoms()].
 #'   - A named list with `atoms` (K × l matrix) and `faces` (integer vector):
 #'     uses these directly.
+#' @param face_descriptors List of face descriptors, or `NULL` (default) to
+#'   use [boundary_face_descriptors()]. Pass an alternative null-hypothesis
+#'   geometry (e.g. [full_plurality_face_descriptors()] or
+#'   [tie_simplex_face_descriptors()]) to run the optimiser over a different
+#'   description of the null.
 #' @param ... Further arguments passed to [run_ripr()] (e.g. `fw_variant`,
 #'   `gap_tol`, `verbose`, …).
 #' @return List with:
@@ -61,9 +66,19 @@ sample_dirichlet_atoms <- function(face_descriptors, n_atoms) {
 #'   - `theta_star`: terminal maximising theta.
 #'   - `converged`: `TRUE` if the FW gap fell below `gap_tol`.
 #' @export
-run_plurality_ripr <- function(n, q, fw_iters, em_iters, init = NULL, ...) {
+run_plurality_ripr <- function(
+  n,
+  q,
+  fw_iters,
+  em_iters,
+  init = NULL,
+  face_descriptors = NULL,
+  ...
+) {
   K <- n_categories(q)
-  face_descriptors <- plurality_face_descriptors(K)
+  if (is.null(face_descriptors)) {
+    face_descriptors <- boundary_face_descriptors(K)
+  }
   likelihood <- make_multinomial_likelihood(n, K)
 
   if (is.null(init)) {

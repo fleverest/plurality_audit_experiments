@@ -116,6 +116,7 @@ run_plurality_ripr <- function(
     kl_trace = result$kl_trace,
     gap = result$gap,
     oracle_theta = result$oracle_theta,
-    converged = result$converged
+    converged = result$converged,
+    checkpoints = result$checkpoints
   )
 }

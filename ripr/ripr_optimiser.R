@@ -584,7 +584,7 @@ run_ripr <- function(
     )
   }
 
-  record_checkpoint <- function(iter) {
+  record_checkpoint <- function(iter, oracle_theta_cp = NULL) {
     if (is.null(checkpoint_iters) || !(iter %in% checkpoint_iters)) {
       return(invisible(NULL))
     }
@@ -593,7 +593,8 @@ run_ripr <- function(
       iter = iter,
       atoms = atoms[seq_len(n_live)],
       weights = weights[seq_len(n_live)],
-      atom_face_idx = atom_face_idx[seq_len(n_live)]
+      atom_face_idx = atom_face_idx[seq_len(n_live)],
+      oracle_theta = oracle_theta_cp
     )
   }
 
@@ -647,8 +648,6 @@ run_ripr <- function(
     }
     kl <- em_result$kl
   }
-  record_checkpoint(0L)
-
   # --- Initial oracle ---
   gap <- NA_real_
   oracle_theta <- NULL
@@ -684,6 +683,7 @@ run_ripr <- function(
       kl_ulb
     ))
   }
+  record_checkpoint(0L, oracle_theta_cp = fw$best_theta)
   if (gap < gap_tol) {
     converged <- TRUE
   }
@@ -779,8 +779,6 @@ run_ripr <- function(
     } else {
       kl <- kl_after_fw
     }
-    record_checkpoint(fw_idx)
-
     # Oracle — single call per iteration; result used for next iteration's FW step
     log_Pw_gpu <- workspace$compute_log_Pw_gpu(weights)
     fw <- fw_oracle(
@@ -818,6 +816,7 @@ run_ripr <- function(
         if (is.na(prop_star)) NaN else prop_star
       ))
     }
+    record_checkpoint(fw_idx, oracle_theta_cp = fw$best_theta)
     if (gap < gap_tol) {
       converged <- TRUE
       if (verbose) {

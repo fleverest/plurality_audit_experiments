@@ -2,7 +2,7 @@ box::use(
   stats[rgamma],
   ripr / mixture[discrete_simplex_mixture, n_categories],
   ripr /
-    plurality_geometry[boundary_face_descriptors],
+    plurality_geometry[full_plurality_face_descriptors],
   ripr / multinomial[make_multinomial_likelihood],
   ripr / ripr_optimiser[run_ripr, fw_gap]
 )
@@ -52,8 +52,8 @@ sample_dirichlet_atoms <- function(face_descriptors, n_atoms) {
 #'   - A named list with `atoms` (K × l matrix) and `faces` (integer vector):
 #'     uses these directly.
 #' @param face_descriptors List of face descriptors, or `NULL` (default) to
-#'   use [boundary_face_descriptors()]. Pass an alternative null-hypothesis
-#'   geometry (e.g. [full_plurality_face_descriptors()] or
+#'   use [full_plurality_face_descriptors()]. Pass an alternative
+#'   null-hypothesis geometry (e.g. [boundary_face_descriptors()] or
 #'   [tie_simplex_face_descriptors()]) to run the optimiser over a different
 #'   description of the null.
 #' @param ... Further arguments passed to [run_ripr()] (e.g. `fw_variant`,
@@ -77,7 +77,7 @@ run_plurality_ripr <- function(
 ) {
   K <- n_categories(q)
   if (is.null(face_descriptors)) {
-    face_descriptors <- boundary_face_descriptors(K)
+    face_descriptors <- full_plurality_face_descriptors(K)
   }
   likelihood <- make_multinomial_likelihood(n, K)
 

@@ -1,9 +1,6 @@
 box::use(
+  utils[combn],
   torch[
-    torch_arange,
-    torch_meshgrid,
-    torch_stack,
-    torch_cat,
     torch_lgamma,
     torch_tensor
   ],
@@ -22,36 +19,28 @@ log_multinom_coef <- function(X, n) {
 }
 
 
-#' All valid count vectors for a multinomial with m categories (GPU)
+#' All valid count vectors for a multinomial with m categories
 #'
 #' Enumerates every integer vector (x_1, ..., x_m) with x_i >= 0 and
-#' sum(x_i) = n using a GPU meshgrid, then filters to valid entries.
+#' sum(x_i) = n via stars and bars: each count vector corresponds to a choice
+#' of m - 1 bar positions among n + m - 1 slots, so the enumeration costs
+#' O(M * m) — proportional to the output — rather than the (n+1)^(m-1) dense
+#' grid it would take to mesh over the first m - 1 coordinates. Enumeration
+#' runs on the host; only the final (M, m) tensor is moved to the device.
 #'
 #' @param n Total number of trials.
 #' @param m Number of categories. Default: 3.
 #' @return Tensor of shape (M, m) where M = choose(n + m - 1, m - 1).
 #' @export
 build_counts_tensor <- function(n, m = 3) {
-  ar <- torch_arange(0, n, device = device, dtype = dtype)
-  grids <- torch_meshgrid(rep(list(ar), m - 1), "ij")
-  stacked <- torch_stack(grids, dim = m)
-
-  sum_first_m1 <- stacked$sum(dim = m)
-  mask <- sum_first_m1 <= n
-  last_cat <- n - sum_first_m1
-
-  spatial_size <- prod(stacked$shape[1:(m - 1)])
-  first_cats_flat <- stacked$reshape(c(spatial_size, m - 1))
-  mask_flat <- mask$reshape(spatial_size)
-  last_cat_flat <- last_cat$reshape(spatial_size)
-
-  first_cats_sel <- first_cats_flat$index_select(
-    1,
-    mask_flat$nonzero()$squeeze()
-  )
-  last_cat_sel <- last_cat_flat$masked_select(mask_flat)
-
-  torch_cat(list(first_cats_sel, last_cat_sel$unsqueeze(2)), dim = 2)
+  counts <- if (m == 1L) {
+    matrix(as.integer(n), nrow = 1L)
+  } else {
+    bars <- combn(n + m - 1L, m - 1L) # (m - 1, M) increasing bar positions
+    boundaries <- rbind(0L, bars, n + m)
+    t(diff(boundaries) - 1L) # x_i = b_i - b_{i-1} - 1, with b_0 = 0, b_m = n + m
+  }
+  torch_tensor(counts, device = device, dtype = dtype)
 }
 
 #' Log PMF of a multinomial for M count vectors and C component distributions

@@ -553,7 +553,7 @@ run_ripr <- function(
   gap_tol = 1e-8,
   ls_tol = 1e-12,
   removal_thresh = 1e-8,
-  fw_variant = c("pairwise", "linesearch", "standard"),
+  fw_variant = c("linesearch", "pairwise", "standard"),
   checkpoint_iters = NULL,
   verbose = TRUE
 ) {

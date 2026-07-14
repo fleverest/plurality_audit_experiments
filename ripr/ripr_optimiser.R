@@ -676,11 +676,12 @@ run_ripr <- function(
   )
   if (verbose) {
     message(sprintf(
-      "Init [%d atoms]: Gap %e, KL %e, ULB %e",
+      "Init [%d atoms]: Gap %e, KL %e, ULB %e, GR %e",
       workspace$n_live(),
       gap,
       kl,
-      kl_ulb
+      kl_ulb,
+      kl - log1p(gap)
     ))
   }
   record_checkpoint(0L, oracle_theta_cp = fw$best_theta)
@@ -804,7 +805,7 @@ run_ripr <- function(
     )
     if (verbose) {
       message(sprintf(
-        "Iter %d [%d atoms]: Gap %e, KL %e (delta %.1e), ULB %e, KL-ULB %e, alpha* %.2e, prop* %.2f",
+        "Iter %d [%d atoms]: Gap %e, KL %e (delta %.1e), ULB %e, KL-ULB %e, GR %e, alpha* %.2e, prop* %.2f",
         fw_idx,
         workspace$n_live(),
         gap,
@@ -812,6 +813,7 @@ run_ripr <- function(
         kl_prev - kl,
         kl_ulb,
         kl - kl_ulb,
+        kl - log1p(gap),
         eps_star,
         if (is.na(prop_star)) NaN else prop_star
       ))

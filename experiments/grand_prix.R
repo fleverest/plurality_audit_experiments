@@ -237,7 +237,7 @@ grand_prix_plan <- function() {
     tar_target(sim_plot_754,  plot_mean_martingales(sim_long, "point_754",  3L)),
     tar_target(sim_plot_855,  plot_mean_martingales(sim_long, "point_855",  3L)),
     tar_target(sim_plot_7531, plot_mean_martingales(sim_long, "point_7531", 4L)),
-    tar_target(sim_plot_8444, plot_mean_martingales(sim_long, "point_8444", 4L))
+    tar_target(sim_plot_8444, plot_mean_martingales(sim_long, "point_8444", 4L)),
 
     NULL   # remove when activating targets above
   )

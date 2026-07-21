@@ -6,25 +6,6 @@ library(nanonext)
 
 # Second IP address is reachable from other compute nodes on M3
 is_m3 <- grepl("m3", Sys.info()[["nodename"]])
-gpu_controller <- if (!is_m3) {
-  crew_controller_local(name = "gpu", workers = 1L)
-} else {
-  crew_controller_slurm(
-    name = "gpu",
-    host = ip_addr()[2L],
-    workers = 2L, # QOSMaxGRESPerUser is 2 for me
-    options_cluster = crew_options_slurm(
-      partition = "gpu",
-      time_minutes = 240L,
-      log_output = "logs/crew_gpu_%A_%a.out",
-      log_error = "logs/crew_gpu_%A_%a.err",
-      script_lines = c(
-        "#SBATCH --gres=gpu:A100:1",
-        "module load r cuda/12.6"
-      )
-    )
-  )
-}
 
 cpu_controller <- if (!is_m3) {
   crew_controller_local(name = "cpu", workers = 4L)
@@ -32,13 +13,13 @@ cpu_controller <- if (!is_m3) {
   crew_controller_slurm(
     name = "cpu",
     host = ip_addr()[2L],
-    workers = 95L, # My QOS allows 100 jobs, but leave some headroom for the controller and gpu jobs, plus an interactive job or two.
+    workers = 95L, # My QOS allows 100 jobs, but leave some headroom for the controller, plus an interactive job or two.
     seconds_idle = 120L,
     options_cluster = crew_options_slurm(
       partition = "comp", # your CPU partition
       cpus_per_task = 1L,
       memory_gigabytes_per_cpu = 10, # MaxTRESPU is 1TB total
-      time_minutes = 60L,
+      time_minutes = 300L, # 5 hours; MaxWall is 7 days
       log_output = "logs/crew_cpu_%A_%a.out",
       log_error = "logs/crew_cpu_%A_%a.err",
       script_lines = "module load r"
@@ -48,7 +29,7 @@ cpu_controller <- if (!is_m3) {
 
 tar_option_set(
   seed = 20260516L,
-  controller = crew_controller_group(cpu_controller, gpu_controller),
+  controller = cpu_controller,
   resources = tar_resources(
     crew = tar_resources_crew(controller = "cpu")
   )

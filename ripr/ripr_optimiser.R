@@ -296,6 +296,50 @@ pairwise_line_search <- function(
   alpha_star
 }
 
+#' Fully-corrective weight reoptimisation via entropic mirror descent.
+#'
+#' Minimises the KL loss over the weight simplex with the atoms held fixed,
+#' using exponentiated-gradient updates w <- w * exp(-eta * grad) (normalised)
+#' with backtracking on the step size eta. `loss_and_grad(w)` must return
+#' `list(loss = , grad = )`; convergence is declared when the per-iteration
+#' decrease falls below `atol + rtol * abs(loss)`.
+mirror_descent_weights <- function(
+  loss_and_grad,
+  weights,
+  max_iters,
+  atol = 1e-12,
+  rtol = 1e-8
+) {
+  cur <- loss_and_grad(weights)
+  eta <- 1
+  for (it in seq_len(max_iters)) {
+    accepted <- FALSE
+    while (eta >= 1e-12) {
+      log_w <- log(pmax(weights, 1e-300)) - eta * cur$grad
+      log_w <- log_w - max(log_w)
+      w_cand <- exp(log_w)
+      w_cand <- w_cand / sum(w_cand)
+      cand <- loss_and_grad(w_cand)
+      if (cand$loss <= cur$loss) {
+        accepted <- TRUE
+        break
+      }
+      eta <- eta / 2
+    }
+    if (!accepted) {
+      break
+    }
+    decrease <- cur$loss - cand$loss
+    weights <- w_cand
+    cur <- cand
+    eta <- eta * 2
+    if (decrease < atol + rtol * abs(cur$loss)) {
+      break
+    }
+  }
+  list(weights = weights, loss = cur$loss)
+}
+
 # =============================================================================
 # Workspace: closures over the pre-allocated atom-log-PMF buffers.
 # =============================================================================
@@ -506,12 +550,28 @@ run_em_step <- function(
 #' @param ls_tol Line-search tolerance. Default 1e-12.
 #' @param removal_thresh Weight threshold below which the worst atom is fully
 #'   replaced in-place by the new FW atom (pairwise mode only). Default 1e-8.
-#' @param fw_variant Frank-Wolfe variant: `"pairwise"` (default), `"linesearch"`,
-#'   or `"standard"`. `"pairwise"` uses vertex-exchange steps (some iterations
-#'   replace rather than add atoms, so final atom count may be less than
-#'   `ncol(init_atoms) + fw_iters`). `"linesearch"` uses standard FW with an
-#'   exact 1-D line search. `"standard"` uses the fixed schedule
-#'   gamma = 2/(k+2).
+#' @param mirror_iters Max entropic-mirror-descent iterations per weight
+#'   reoptimisation (fully-corrective mode only). Convergence uses
+#'   `kl_atol`/`kl_rtol`. Default 500.
+#' @param fw_variant Frank-Wolfe variant: `"line-search"` (default),
+#'   `"pairwise"`, `"vanilla"`, or `"fully-corrective"`. All four share the
+#'   same oracle step (find the atom maximising `E_theta[Q / P_w]`) and differ
+#'   only in how the mixture weights are updated once that atom is found:
+#'   - `"vanilla"` takes the fixed FW step schedule gamma = 2/(k+2), giving
+#'     the new atom weight gamma and shrinking all existing weights by
+#'     (1 - gamma).
+#'   - `"line-search"` replaces that fixed schedule with an exact 1-D line
+#'     search over the new atom's mixing weight.
+#'   - `"pairwise"` is a vertex-exchange step: mass moves from the
+#'     current worst atom directly to the new one (via a 1-D line search over
+#'     the transferred mass), so some iterations replace rather than add
+#'     atoms and the final atom count may be less than
+#'     `ncol(init_atoms) + fw_iters`.
+#'   - `"fully-corrective"` is the most expensive variant: the new atom is
+#'     seeded with the `"line-search"` step, then *all* mixture weights
+#'     (old and new) are completely reoptimised by minimising KL over the
+#'     current atom set via entropic mirror descent, rather than only
+#'     adjusting the weight of the newest atom.
 #' @param checkpoint_iters Integer vector of outer-iteration indices (0 =
 #'   post-init, before any FW step) at which to snapshot `(atoms, weights,
 #'   atom_face_idx)`. Snapshots are taken after that iteration's EM
@@ -530,7 +590,9 @@ run_em_step <- function(
 #'   - `kl_trace`: data.frame with columns `iter`, `step_type`
 #'       (`"init"`, `"em"`, `"fw"`), `n_atoms`, `kl`.
 #'   - `history`: data.frame with columns `iter`, `face_idx`, `gap`,
-#'       `eps_star`, `prop_star`, `kl_after_fw`, `kl_after_em`, `kl_ulb`.
+#'       `eps_star`, `prop_star`, `kl_after_fw`, `kl_after_em`, `kl_ulb`,
+#'       `gr` (log-growth-rate lower bound, `kl_after_em - log1p(gap)`),
+#'       `best_gr` (running max of `gr` within this run), `elapsed_s`.
 #'   - `gap`: terminal FW gap value (E_star - 1).
 #'   - `oracle_theta`: terminal maximising theta.
 #'   - `kl`: terminal KL divergence.
@@ -553,7 +615,8 @@ run_ripr <- function(
   gap_tol = 1e-8,
   ls_tol = 1e-12,
   removal_thresh = 1e-8,
-  fw_variant = c("linesearch", "pairwise", "standard"),
+  mirror_iters = 500L,
+  fw_variant = c("line-search", "pairwise", "vanilla", "fully-corrective"),
   checkpoint_iters = NULL,
   verbose = TRUE
 ) {
@@ -574,6 +637,7 @@ run_ripr <- function(
   outer_rows <- list()
   checkpoints <- list()
   kl_ulb <- -Inf
+  best_gr <- -Inf
 
   record_trace <- function(iter, type, n_atoms, kl_val) {
     trace_rows[[length(trace_rows) + 1L]] <<- data.frame(
@@ -663,6 +727,8 @@ run_ripr <- function(
   gap <- fw$E_star - 1
   oracle_theta <- fw$best_theta
   kl_ulb <- kl - gap
+  gr <- kl - log1p(gap)
+  best_gr <- max(best_gr, gr)
   outer_rows[[1L]] <- data.frame(
     iter = 0L,
     face_idx = fw$best_fi,
@@ -672,6 +738,8 @@ run_ripr <- function(
     kl_after_fw = NA_real_,
     kl_after_em = kl,
     kl_ulb = kl_ulb,
+    gr = gr,
+    best_gr = best_gr,
     elapsed_s = proc.time()[["elapsed"]] - t_start
   )
   if (verbose) {
@@ -681,7 +749,7 @@ run_ripr <- function(
       gap,
       kl,
       kl_ulb,
-      kl - log1p(gap)
+      gr
     ))
   }
   record_checkpoint(0L, oracle_theta_cp = fw$best_theta)
@@ -733,7 +801,7 @@ run_ripr <- function(
         workspace$add_atom_col(fw$best_theta)
         prop_star <- alpha_star / w_worst
       }
-    } else if (fw_variant == "linesearch") {
+    } else if (fw_variant == "line-search") {
       eps_star <- fw_line_search(
         log_Pw_gpu,
         log_tm_new,
@@ -744,6 +812,28 @@ run_ripr <- function(
       atoms <- c(atoms, list(fw$best_theta))
       atom_face_idx <- c(atom_face_idx, fw$best_fi)
       workspace$add_atom_col(fw$best_theta)
+      prop_star <- NA_real_
+    } else if (fw_variant == "fully-corrective") {
+      # Fully-corrective FW: seed the new atom's weight via the 1-D line
+      # search, then completely reoptimise all weights over the current atoms.
+      eps_star <- fw_line_search(
+        log_Pw_gpu,
+        log_tm_new,
+        workspace$q_mass_gpu,
+        tol = ls_tol
+      )
+      weights <- c(weights * (1 - eps_star), eps_star)
+      atoms <- c(atoms, list(fw$best_theta))
+      atom_face_idx <- c(atom_face_idx, fw$best_fi)
+      workspace$add_atom_col(fw$best_theta)
+      md <- mirror_descent_weights(
+        workspace$kl_loss_and_grad,
+        weights,
+        max_iters = mirror_iters,
+        atol = kl_atol,
+        rtol = kl_rtol
+      )
+      weights <- md$weights
       prop_star <- NA_real_
     } else {
       eps_star <- 2 / (fw_idx + 2)
@@ -792,6 +882,8 @@ run_ripr <- function(
     gap <- fw$E_star - 1
     oracle_theta <- fw$best_theta
     kl_ulb <- max(kl_ulb, kl - gap)
+    gr <- kl - log1p(gap)
+    best_gr <- max(best_gr, gr)
     outer_rows[[length(outer_rows) + 1L]] <- data.frame(
       iter = fw_idx,
       face_idx = fw$best_fi,
@@ -801,6 +893,8 @@ run_ripr <- function(
       kl_after_fw = kl_after_fw,
       kl_after_em = kl,
       kl_ulb = kl_ulb,
+      gr = gr,
+      best_gr = best_gr,
       elapsed_s = proc.time()[["elapsed"]] - t_start
     )
     if (verbose) {
@@ -813,7 +907,7 @@ run_ripr <- function(
         kl_prev - kl,
         kl_ulb,
         kl - kl_ulb,
-        kl - log1p(gap),
+        gr,
         eps_star,
         if (is.na(prop_star)) NaN else prop_star
       ))

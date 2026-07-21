@@ -260,10 +260,11 @@ method(log_pmf, truncated_dirichlet) <- function(
   # so loop. Move X to CPU once.
   X_cpu <- as.matrix(as.array(X$cpu()))
   N <- nrow(X_cpu)
-  log_I_num <- numeric(N)
-  for (i in seq_len(N)) {
-    log_I_num[i] <- log_I(alpha + X_cpu[i, ])
-  }
+  log_I_num <- vapply(
+    seq_len(N),
+    \(i) log_I(alpha + X_cpu[i, ]),
+    numeric(1L)
+  )
   log_I_num_t <- torch_tensor(log_I_num, device = device, dtype = dtype)
 
   log_multinom_coef + log_I_num_t - log_I_denom
@@ -271,6 +272,124 @@ method(log_pmf, truncated_dirichlet) <- function(
 
 method(n_categories, truncated_dirichlet) <- function(simplex_mixture) {
   length(simplex_mixture@alpha)
+}
+
+
+#' Pairwise-null reverse information projection of a simplex mixture
+#'
+#' Represents the RIPr P* of the numerator `Q` onto the pairwise plurality
+#' null `H_0^{(j)} = {theta_1 <= theta_j}`. Let `pi_j` replace coordinates 1
+#' and `j` of theta by their average and fix the rest; for any mixing measure
+#' W_1 with `W_1({theta_1 >= theta_j}) = 1` (true for any prior on the
+#' plurality alternative H_1; not checked here), the RIPr of `Q = P_{W_1}`
+#' onto `H_0^{(j)}` is the pushforward `P* = P_{pi_j # W_1}`:
+#' `E_phi[Q / P*] = 1` on the tie facet `{theta_1 = theta_j}` and `< 1`
+#' strictly inside the null, which is the variational characterisation of
+#' the projection over the convex null.
+#'
+#' The pmf needs no new integrals for any Q. Factoring the multinomial
+#' through the sufficient split `N = x_1 + x_j` and expanding
+#' `(theta_1 + theta_j)^N` binomially gives the finite-sum identity
+#'
+#'   P*(x) = Bin(x_1 | N, 1/2) * sum_{m=0}^{N} Q(x with (x_1, x_j) -> (m, N-m)),
+#'
+#' i.e. P* keeps Q's marginal over `(N, x_{-1,-j})` and freezes the split
+#' conditional at `Binomial(N, 1/2)`. `log_pmf` implements this via one
+#' stacked `log_pmf(Q, .)` call plus a grouped logsumexp, so it works
+#' uniformly for point masses, discrete mixtures, and [truncated_dirichlet()]
+#' numerators.
+#'
+#' @slot Q The numerator `simplex_mixture` being projected.
+#' @slot j Integer in `2:K`. The competing candidate defining the null.
+#' @slot n Optional integer multinomial sample size (informational, as in
+#'   [discrete_simplex_mixture()]).
+#' @export
+pairwise_projection <- new_class(
+  "pairwise_projection",
+  parent = simplex_mixture,
+  properties = list(
+    Q = simplex_mixture,
+    j = class_numeric,
+    n = new_property(default = NULL)
+  ),
+  constructor = function(Q, j, n = NULL) {
+    K <- n_categories(Q)
+    j <- as.integer(j)
+    if (length(j) != 1L || j < 2L || j > K) {
+      stop("`j` must be a single integer in 2:K")
+    }
+    # pi_j is linear, so the pushforward mean is pi_j applied to Q's mean.
+    mean_val <- Q@mean
+    mean_val[c(1L, j)] <- (mean_val[1L] + mean_val[j]) / 2
+    new_object(
+      S7_object(),
+      Q = Q,
+      j = j,
+      n = n,
+      mean = mean_val,
+      mode = rep(NA_real_, K)
+    )
+  }
+)
+
+logsumexp_num <- function(v) {
+  m <- max(v)
+  if (!is.finite(m)) {
+    return(m)
+  }
+  m + log(sum(exp(v - m)))
+}
+
+method(log_pmf, pairwise_projection) <- function(simplex_mixture, X) {
+  Q <- simplex_mixture@Q
+  j <- simplex_mixture@j
+  X_cpu <- if (inherits(X, "torch_tensor")) {
+    as.matrix(as.array(X$cpu()))
+  } else if (is.null(dim(X))) {
+    matrix(X, nrow = 1L)
+  } else {
+    as.matrix(X)
+  }
+
+  x1 <- X_cpu[, 1L]
+  N <- x1 + X_cpu[, j]
+  merged <- X_cpu
+  merged[, 1L] <- N
+  merged[, j] <- 0
+  key <- apply(merged, 1L, paste, collapse = "_")
+  grp <- match(key, key) # index of first row in each (N, x_-) group
+
+  # One stacked Q evaluation over every split (m, N - m) of every unique group.
+  rep_idx <- which(!duplicated(key))
+  split_rows <- lapply(rep_idx, function(i) {
+    m <- 0:N[i]
+    rows <- matrix(
+      X_cpu[i, ],
+      nrow = N[i] + 1L,
+      ncol = ncol(X_cpu),
+      byrow = TRUE
+    )
+    rows[, 1L] <- m
+    rows[, j] <- N[i] - m
+    rows
+  })
+  stacked <- do.call(rbind, split_rows)
+  stacked_grp <- rep(rep_idx, times = N[rep_idx] + 1L)
+  log_q_stacked <- as.numeric(log_pmf(Q, stacked)$cpu())
+
+  # log of Q's marginal over the merged outcome (N, x_-), per group.
+  log_marg <- vapply(
+    split(log_q_stacked, stacked_grp),
+    logsumexp_num,
+    numeric(1L)
+  )[as.character(grp)]
+
+  result <- log_marg + lchoose(N, x1) - N * log(2)
+  torch_tensor(result, device = device, dtype = dtype)
+}
+
+method(n_categories, pairwise_projection) <- function(simplex_mixture) {
+  n_categories(simplex_mixture@Q)
 }
 
 

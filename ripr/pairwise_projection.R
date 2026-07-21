@@ -58,12 +58,7 @@ pairwise_log_pstar <- function(log_q, X_cpu, j) {
   key <- apply(merged, 1L, paste, collapse = "_")
   grp <- match(key, key)
   f <- match(grp, unique(grp)) # dense ids 1..G, first-occurrence order
-  log_marg_by_rep <- vapply(
-    split(log_q_stacked, factor(stacked_grp, levels = rep_idx)),
-    logsumexp_num,
-    numeric(1L)
-  )
-  log_marg <- log_marg_by_rep[match(grp, rep_idx)]
+  log_marg <- vapply(split(log_q, f), logsumexp, numeric(1L))[f]
   log_marg + lchoose(N, x1) - N * log(2)
 }
 

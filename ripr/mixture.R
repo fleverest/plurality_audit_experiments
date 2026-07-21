@@ -378,11 +378,12 @@ method(log_pmf, pairwise_projection) <- function(simplex_mixture, X) {
   log_q_stacked <- as.numeric(log_pmf(Q, stacked)$cpu())
 
   # log of Q's marginal over the merged outcome (N, x_-), per group.
-  log_marg <- vapply(
-    split(log_q_stacked, stacked_grp),
+  log_marg_by_rep <- vapply(
+    split(log_q_stacked, factor(stacked_grp, levels = rep_idx)),
     logsumexp_num,
     numeric(1L)
-  )[as.character(grp)]
+  )
+  log_marg <- log_marg_by_rep[match(grp, rep_idx)]
 
   result <- log_marg + lchoose(N, x1) - N * log(2)
   torch_tensor(result, device = device, dtype = dtype)
